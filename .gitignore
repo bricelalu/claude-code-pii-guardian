@@ -1,0 +1,4 @@
+.claude/
+.env
+manifests/20-litellm-secret.yaml
+manifests/litellm-secret.yaml

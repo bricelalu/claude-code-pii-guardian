@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          # DIGEST_NOT_PINNED — run: task pin-images
+          # Supply chain: ONLY use ghcr.io/berriai/litellm. NEVER pip install litellm.
+          # See README §Supply Chain — LiteLLM PyPI 1.82.7 and 1.82.8 contained credential-stealing malware.
+          image: ghcr.io/berriai/litellm:main-stable@sha256:29252f25ed1b538d44f6b76ec97412c5537a180b39ede744b9f3e86ffdd278f5
+          args:
+            - "--config"
+            - "/app/config.yaml"
+            - "--port"
+            - "4000"
+            - "--detailed_debug"
+          ports:
+            - containerPort: 4000
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: LITELLM_MASTER_KEY
+            - name: PRESIDIO_ANALYZER_API_BASE
+              value: "http://presidio-analyzer.gateway.svc.cluster.local:3000"
+            - name: PRESIDIO_ANONYMIZER_API_BASE
+              value: "http://presidio-anonymizer.gateway.svc.cluster.local:3000"
+            - name: LITELLM_LOG
+              value: "DEBUG"
+            - name: DATABASE_URL
+              value: "postgresql://litellm:litellm-poc@postgres.gateway.svc.cluster.local:5432/litellm"
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health/liveliness
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 4000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 4
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: gateway
+spec:
+  selector:
+    app: litellm
+  ports:
+    - port: 4000
+      targetPort: 4000
+  type: ClusterIP

@@ -1,0 +1,291 @@
+version: '3'
+
+dotenv: ['.env']
+
+vars:
+  CLUSTER_NAME: claude-gateway-poc
+  NAMESPACE: gateway
+  LITELLM_IMAGE: ghcr.io/berriai/litellm:main-stable
+  PRESIDIO_ANALYZER_IMAGE: mcr.microsoft.com/presidio-analyzer:latest
+  PRESIDIO_ANONYMIZER_IMAGE: mcr.microsoft.com/presidio-anonymizer:latest
+  PF_PID_FILE: /tmp/pii-guardian-pf.pid
+
+# ─────────────────────────────────────────────────────────────────
+# Supply chain tasks
+# ─────────────────────────────────────────────────────────────────
+
+tasks:
+  pin-images:
+    desc: Pull container images and pin their SHA-256 digests in manifests (run once, commit the diff)
+    cmds:
+      - |
+        set -euo pipefail
+        pin() {
+          local tag="$1" manifest="$2"
+          echo "→ Pulling $tag ..."
+          docker pull "$tag" > /dev/null 2>&1
+          local repo_digest
+          repo_digest=$(docker inspect --format='{{"{{"}}index .RepoDigests 0{{"}}"}}' "$tag" 2>/dev/null || true)
+          if [ -z "$repo_digest" ]; then
+            echo "ERROR: no RepoDigest for $tag — image may not be in a registry. Cannot pin." >&2
+            exit 1
+          fi
+          local digest
+          digest=$(echo "$repo_digest" | awk -F'@' '{print $2}')
+          local pinned="${tag}@${digest}"
+          # Replace both already-pinned and un-pinned forms
+          sed -i.bak \
+            -e "s|image: ${tag}@sha256:[a-f0-9]*|image: ${pinned}|g" \
+            -e "s|image: ${tag}$|image: ${pinned}|g" \
+            "$manifest"
+          rm -f "${manifest}.bak"
+          echo "  ✓ ${pinned}"
+        }
+        pin "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
+        pin "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        pin "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
+        echo ""
+        echo "Digests pinned. Review 'git diff manifests/' before committing."
+
+  verify-images:
+    desc: Re-pull images and verify SHA-256 digests match manifests; fails hard if not pinned
+    cmds:
+      - |
+        set -euo pipefail
+        FAIL=0
+
+        check_pinned() {
+          local tag="$1" manifest="$2"
+          if ! grep -qE "image: ${tag}@sha256:[a-f0-9]+" "$manifest"; then
+            echo "✗ DIGEST_NOT_PINNED: $tag in $manifest" >&2
+            echo "  → Run: task pin-images" >&2
+            FAIL=1
+          fi
+        }
+
+        check_pinned "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
+        check_pinned "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        check_pinned "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
+
+        [ "$FAIL" = "0" ] || exit 1
+
+        echo "Verifying image digests against registry..."
+
+        verify() {
+          local tag="$1" manifest="$2"
+          local pinned_ref
+          pinned_ref=$(grep -E "image: ${tag}@sha256:" "$manifest" | awk '{print $2}')
+          local pinned_digest="${pinned_ref##*@sha256:}"
+
+          docker pull "$tag" > /dev/null 2>&1
+          local current_repo_digest
+          current_repo_digest=$(docker inspect --format='{{"{{"}}index .RepoDigests 0{{"}}"}}' "$tag" 2>/dev/null || true)
+          local current_digest="${current_repo_digest##*@sha256:}"
+
+          if [ "$pinned_digest" = "$current_digest" ]; then
+            echo "  ✓ $tag — digest matches (sha256:${pinned_digest:0:12}...)"
+          else
+            echo "  ✗ $tag — DIGEST MISMATCH" >&2
+            echo "    manifest : sha256:${pinned_digest}" >&2
+            echo "    registry : sha256:${current_digest}" >&2
+            echo "    The image on the registry has changed. Review before re-pinning." >&2
+            FAIL=1
+          fi
+        }
+
+        verify "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
+        verify "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        verify "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
+
+        [ "$FAIL" = "0" ] || exit 1
+        echo "All image digests verified."
+
+# ─────────────────────────────────────────────────────────────────
+# Cluster lifecycle
+# ─────────────────────────────────────────────────────────────────
+
+  up:
+    desc: Create K3D cluster (idempotent), apply manifests, wait for pods to be Ready
+    deps: [verify-images]
+    cmds:
+      - |
+        set -euo pipefail
+
+        if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+          echo "ERROR: ANTHROPIC_API_KEY is not set." >&2
+          echo "  Copy .env.example to .env and set your Anthropic API key." >&2
+          exit 1
+        fi
+
+        # Create cluster if it doesn't already exist
+        if k3d cluster list --no-headers 2>/dev/null | grep -q "{{.CLUSTER_NAME}}"; then
+          echo "Cluster '{{.CLUSTER_NAME}}' already exists — skipping creation."
+        else
+          echo "Creating K3D cluster '{{.CLUSTER_NAME}}' ..."
+          k3d cluster create --config k3d/cluster.yaml
+          echo "Cluster created."
+        fi
+
+        # Point kubectl at the new cluster
+        k3d kubeconfig merge "{{.CLUSTER_NAME}}" --kubeconfig-switch-context > /dev/null
+
+        # Apply manifests in order
+        echo "Applying manifests..."
+        kubectl apply -f manifests/00-namespace.yaml
+
+        # Create secret directly — no envsubst required
+        kubectl create secret generic litellm-secrets \
+          -n "{{.NAMESPACE}}" \
+          --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+          --from-literal=LITELLM_MASTER_KEY="sk-poc-local-only" \
+          --save-config \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        kubectl apply -f manifests/21-litellm-config.yaml
+        kubectl apply -f manifests/10-presidio-analyzer.yaml
+        kubectl apply -f manifests/11-presidio-anonymizer.yaml
+        kubectl apply -f manifests/22-litellm.yaml
+
+        # Wait for deployments.
+        # First run pulls images inside k3d's own containerd (not host Docker cache).
+        # Presidio Analyzer is ~1GB; allow 5 minutes for cold-pull on first run.
+        # Subsequent task up (after task down) is fast — images are cached inside the cluster.
+        echo "Waiting for deployments to become ready (timeout 300s — first run may pull images)..."
+        kubectl rollout status deployment/presidio-analyzer  -n "{{.NAMESPACE}}" --timeout=300s
+        kubectl rollout status deployment/presidio-anonymizer -n "{{.NAMESPACE}}" --timeout=300s
+        kubectl rollout status deployment/litellm             -n "{{.NAMESPACE}}" --timeout=300s
+
+        echo ""
+        echo "✓ Gateway stack is ready."
+
+  down:
+    desc: Stop the K3D cluster (preserves state)
+    cmds:
+      - k3d cluster stop "{{.CLUSTER_NAME}}"
+
+  clean:
+    desc: Delete the K3D cluster entirely
+    cmds:
+      - |
+        k3d cluster delete "{{.CLUSTER_NAME}}" && echo "✓ Cluster deleted."
+
+# ─────────────────────────────────────────────────────────────────
+# Operations
+# ─────────────────────────────────────────────────────────────────
+
+  status:
+    desc: Pod status + last 20 log lines + LiteLLM health check
+    cmds:
+      - |
+        set -euo pipefail
+        echo "=== Pods ==="
+        kubectl get pods -n "{{.NAMESPACE}}" -o wide
+        echo ""
+        echo "=== LiteLLM logs (last 20 lines) ==="
+        kubectl logs -n "{{.NAMESPACE}}" -l app=litellm --tail=20 2>/dev/null || echo "(no logs yet)"
+        echo ""
+        echo "=== LiteLLM /health ==="
+        PF_PID=""
+        kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4001:4000 &>/dev/null &
+        PF_PID=$!
+        sleep 2
+        curl -sf http://localhost:4001/health | (command -v jq &>/dev/null && jq . || cat) || echo "(health check failed)"
+        kill "$PF_PID" 2>/dev/null || true
+
+  logs:
+    desc: Follow LiteLLM logs
+    cmds:
+      - kubectl logs -n "{{.NAMESPACE}}" -l app=litellm -f
+
+  port-forward:
+    desc: Forward localhost:4000 → gateway/litellm:4000 (foreground, blocks)
+    cmds:
+      - kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4000:4000
+
+# ─────────────────────────────────────────────────────────────────
+# Demo
+# ─────────────────────────────────────────────────────────────────
+
+  demo:
+    desc: Run the full PII-Guardian demo — MASK, AUDIT, and BLOCK scenarios
+    cmds:
+      - |
+        set -euo pipefail
+
+        # ── Prerequisites check ──────────────────────────────────
+        if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+          echo "ERROR: ANTHROPIC_API_KEY is not set." >&2
+          echo "  Copy .env.example to .env and set your key." >&2
+          exit 1
+        fi
+
+        if ! command -v claude &>/dev/null; then
+          echo "ERROR: 'claude' CLI not found in PATH." >&2
+          echo "  Install Claude Code: https://claude.ai/download" >&2
+          exit 1
+        fi
+
+        # ── Bring the stack up (idempotent) ─────────────────────
+        task up
+
+        # ── Wait for LiteLLM /health ─────────────────────────────
+        echo "Waiting for LiteLLM /health (up to 60s)..."
+        kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4000:4000 &>/dev/null &
+        PF_PID=$!
+        echo "$PF_PID" > "{{.PF_PID_FILE}}"
+
+        # Cleanup on exit (including Ctrl-C)
+        trap 'kill "$PF_PID" 2>/dev/null; rm -f "{{.PF_PID_FILE}}"; echo ""; echo "Port-forward stopped."' EXIT INT TERM
+
+        HEALTHY=0
+        for i in $(seq 1 30); do
+          if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+            HEALTHY=1
+            break
+          fi
+          sleep 2
+        done
+
+        if [ "$HEALTHY" = "0" ]; then
+          echo "ERROR: LiteLLM did not become healthy within 60s." >&2
+          echo "  Run: task logs" >&2
+          exit 1
+        fi
+
+        echo "✓ LiteLLM is healthy."
+        echo ""
+
+        # ── Setup banner ─────────────────────────────────────────
+        echo "┌─────────────────────────────────────────────────────────┐"
+        echo "│  PII-GUARDIAN DEMO                                      │"
+        echo "│                                                         │"
+        echo "│  Claude Code is routing through the local gateway.      │"
+        echo "│  Export these in another shell to test manually:        │"
+        echo "│                                                         │"
+        echo "│    export ANTHROPIC_BASE_URL=http://localhost:4000      │"
+        echo "│    export ANTHROPIC_AUTH_TOKEN=sk-poc-local-only        │"
+        echo "└─────────────────────────────────────────────────────────┘"
+        echo ""
+
+        # ── Scenario 1: MASK ─────────────────────────────────────
+        bash demo/scenario-mask.sh
+
+        read -rn1 -p "Press any key for Scenario 2 (AUDIT)..." _
+        echo ""
+
+        # ── Scenario 2: AUDIT ────────────────────────────────────
+        bash demo/scenario-audit.sh
+
+        read -rn1 -p "Press any key for Scenario 3 (BLOCK)..." _
+        echo ""
+
+        # ── Scenario 3: BLOCK ────────────────────────────────────
+        bash demo/scenario-block.sh
+
+        # ── Final banner ─────────────────────────────────────────
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║  Demo complete.                                         ║"
+        echo "║  Run 'task logs' for the full audit trail.             ║"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""

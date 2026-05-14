@@ -1,7 +1,80 @@
-#  Local POC: PII-Guardian - PII-Aware AI Gateway for Claude Code
+# PII-Guardian — PII-Aware AI Gateway for Claude Code
 
-**Status:** Draft for implementation by Claude Code
-**Estimated effort:** 1–2 days
+A local POC that validates a GDPR defense-in-depth architecture: PII is detected, masked, and
+selectively blocked by a LiteLLM + Microsoft Presidio gateway **before prompts leave your perimeter**.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Prerequisites: Docker, k3d ≥ v5.6, kubectl ≥ v1.28, task ≥ v3.30, jq, Claude Code CLI ≥ v2.1.129
+
+# 2. Configure your Anthropic API key
+cp .env.example .env
+# Edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. Pin image digests (one-time — commit the resulting git diff after review)
+task pin-images
+
+# 4. Run the demo
+task demo
+```
+
+The demo brings up a local K3D cluster, routes Claude Code through a LiteLLM + Presidio gateway,
+and walks through three scenarios proving **MASK**, **AUDIT**, and **BLOCK** behaviors.
+
+---
+
+## Supply Chain
+
+> **WARNING — NEVER run `pip install litellm` for any reason, including local development.**
+>
+> LiteLLM PyPI versions **1.82.7 and 1.82.8 contained credential-stealing malware**
+> (documented by Anthropic). This project uses the official container image only:
+> `ghcr.io/berriai/litellm:main-stable`, pinned to a specific SHA-256 digest.
+>
+> The `task pin-images` command pins digests. The `task verify-images` step (which `task up`
+> depends on) fails hard if any image in the manifests lacks a `@sha256:` pin.
+> **Review the `git diff manifests/` output before committing pinned digests.**
+
+---
+
+## Operator Prerequisites
+
+- macOS or Linux
+- Docker Desktop or Podman 4.x with Docker socket emulation
+- `k3d` ≥ v5.6
+- `kubectl` ≥ v1.28
+- `task` (Taskfile.dev) ≥ v3.30
+- `jq`
+- Claude Code CLI ≥ v2.1.129
+- An Anthropic API key with access to Claude models (set in `.env` as `ANTHROPIC_API_KEY`)
+- Network access to `api.anthropic.com`
+
+The API key is consumed by LiteLLM to authenticate outbound requests. Developers' Claude Code
+subscriptions are separate and are not used by the gateway. See §14 of the spec for production
+authentication options (including the subscription-only path).
+
+---
+
+## Task Reference
+
+| Command | Description |
+|---------|-------------|
+| `task pin-images` | Pull images and write SHA-256 digests into manifests (run once) |
+| `task up` | Create K3D cluster, apply manifests, wait for Ready |
+| `task demo` | Full demo — MASK, AUDIT, BLOCK scenarios |
+| `task down` | Stop the cluster (preserves state) |
+| `task clean` | Delete the cluster entirely |
+| `task verify-images` | Re-pull and verify digests match manifests |
+| `task status` | Pod status + last 20 log lines + health check |
+| `task logs` | Follow LiteLLM logs |
+| `task port-forward` | Forward localhost:4000 → gateway (foreground) |
+
+---
+
+**Status:** Implemented
 **Reference docs:**
 - Claude Code Network Configuration
 - Claude Code LLM Gateway
@@ -262,7 +335,7 @@ demo/show-evidence.sh is invoked by each scenario. It must:
 
 ## 11. Acceptance Criteria
 A reviewer running task demo on a clean machine must observe:
-1. K3D cluster becomes ready in under **90 seconds**
+1. K3D cluster + pods become ready (first run ~3–5 min for image pulls inside k3d's containerd; subsequent `task down` / `task up` is fast — images are cached)
 2. Three scenarios execute sequentially with clear visual demarcation
 3. **MASK** scenario shows side-by-side "user input" vs "sent to Anthropic" with PII visibly redacted
 4. **AUDIT** scenario shows a detection log entry without prompt modification
