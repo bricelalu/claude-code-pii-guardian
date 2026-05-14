@@ -28,11 +28,6 @@ spec:
           ports:
             - containerPort: 4000
           env:
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: litellm-secrets
-                  key: ANTHROPIC_API_KEY
             - name: LITELLM_MASTER_KEY
               valueFrom:
                 secretKeyRef:
