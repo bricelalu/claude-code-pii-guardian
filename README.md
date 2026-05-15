@@ -110,49 +110,83 @@ Stay tight on scope. Do **not**:
 - **Install LiteLLM via pip install litellm.** See section 13 — only the official container image is acceptable.
 
 ## 4. Architecture
+
 The integration follows the officially documented LLM gateway pattern: Claude Code is pointed at LiteLLM via ANTHROPIC_BASE_URL, authenticates to LiteLLM via ANTHROPIC_AUTH_TOKEN, and LiteLLM forwards to Anthropic using its own configured API key.
 
-┌──────────────────────┐
-│  Claude Code CLI     │   env:
-│                      │   ANTHROPIC_BASE_URL=http://localhost:4000
-│                      │   ANTHROPIC_AUTH_TOKEN=sk-poc-local-only
-└──────────┬───────────┘
-           │  POST /v1/messages
-           │  Authorization: Bearer sk-poc-local-only
-           │  X-Claude-Code-Session-Id: <uuid>
-           ▼
-┌──────────────────────┐
-│  kubectl port-forward │  svc/litellm 4000:4000
-└──────────┬───────────┘
-           │
-           ▼
-   ┌─────────────────────── K3D cluster ────────────┐
-   │  Namespace: gateway                            │
-   │                                                │
-   │  ┌────────────────────────────────────────┐   │
-   │  │  LiteLLM Proxy (port 4000)             │   │
-   │  │  /v1/messages (unified Anthropic fmt)  │   │
-   │  │                                        │   │
-   │  │   ┌──── pre_call guardrail ────┐       │   │
-   │  │   │  MASK email/name/phone     │       │   │
-   │  │   │  BLOCK credit_card/iban    │       │   │
-   │  │   └────────────────────────────┘       │   │
-   │  │   ┌──── logging_only guardrail ──┐     │   │
-   │  │   │  AUDIT faint PII signals     │     │   │
-   │  │   └──────────────────────────────┘     │   │
-   │  └────────────┬───────────────────────────┘   │
-   │               │                                │
-   │               ▼                                │
-   │  ┌──────────────────┐  ┌──────────────────┐  │
-   │  │ Presidio         │  │ Presidio         │  │
-   │  │ Analyzer (3000)  │  │ Anonymizer (3000)│  │
-   │  └──────────────────┘  └──────────────────┘  │
-   │                                                │
-   └────────────────────────┬──────────────────────┘
-                            │  Authenticated with Anthropic API key
-                            │  held in LiteLLM (Kubernetes Secret)
-                            ▼
-                  https://api.anthropic.com
+```mermaid
+graph TD
+    CLI["🖥️ Claude Code CLI"]
+    
+    CLI1["Auth Option 1:<br/>x-litellm-api-key=sk-xxx"]
+    CLI2["Auth Option 2 BYOK:<br/>x-api-key=sk-ant-xxx<br/>x-litellm-api-key=sk-xxx"]
+    
+    PF["🔗 kubectl port-forward<br/>localhost:4000 → svc/litellm:4000"]
+    
+    K3D["☸️ K3D Cluster<br/>Namespace: gateway"]
+    
+    LLM["⚡ LiteLLM Proxy<br/>Port 4000 | /v1/messages"]
+    
+    PRE["🛡️ Pre-Call Guardrail<br/>MASK: email, name, phone<br/>BLOCK: credit_card, iban"]
+    
+    AUDIT["📊 Audit Guardrail<br/>LOG: faint PII signals<br/>Mode: logging_only"]
+    
+    ANALYZER["🔍 Presidio Analyzer<br/>Port 3000"]
+    
+    ANON["🔐 Presidio Anonymizer<br/>Port 3000"]
+    
+    ROUTE1["Route: Proxy Key<br/>Uses Secret from cluster"]
+    ROUTE2["Route: Client Key<br/>Forwards x-api-key header<br/>forward_llm_provider_auth_headers: true"]
+    
+    ANTHROPIC["🌐 Anthropic API<br/>https://api.anthropic.com"]
+    
+    CLI --> CLI1
+    CLI --> CLI2
+    CLI1 --> PF
+    CLI2 --> PF
+    PF -->|localhost:4000| K3D
+    K3D --> LLM
+    
+    LLM --> PRE
+    LLM --> AUDIT
+    PRE --> ANALYZER
+    AUDIT --> ANALYZER
+    ANALYZER --> ANON
+    
+    ANON --> ROUTE1
+    ANON --> ROUTE2
+    
+    ROUTE1 -->|Proxy-configured API key| ANTHROPIC
+    ROUTE2 -->|Client API key overrides| ANTHROPIC
+    
+    style CLI fill:#e1f5ff
+    style CLI1 fill:#bbdefb
+    style CLI2 fill:#bbdefb
+    style PF fill:#f3e5f5
+    style K3D fill:#fff3e0
+    style LLM fill:#fce4ec
+    style PRE fill:#ffebee
+    style AUDIT fill:#f1f8e9
+    style ANALYZER fill:#e0f2f1
+    style ANON fill:#e0f2f1
+    style ROUTE1 fill:#c8e6c9
+    style ROUTE2 fill:#fff9c4
+    style ANTHROPIC fill:#f3e5f5
+```
+
+### Authentication Modes
+
+The diagram shows two auth paths supported by `forward_llm_provider_auth_headers`:
+
+| Mode | Use Case | Header | How It Works |
+|------|----------|--------|--------------|
+| **Proxy Mode** (POC default) | Centralized auth, shared costs | `x-litellm-api-key=sk-poc-local-only` | LiteLLM uses its Kubernetes Secret API key; client auth is just to unlock the proxy. |
+| **BYOK** (Bring Your Own Key) | Client pays directly, audit per-developer | `x-api-key=sk-ant-...`<br/>`x-litellm-api-key=sk-poc-local-only` | LiteLLM forwards the client's API key to Anthropic, overriding the proxy key. |
+
+### Why This Matters
+
+- **POC (this project):** Uses Proxy Mode — one shared API key from the Kubernetes Secret. Simpler for demo. Cost is centralized.
+- **Production BYOK:** When enabled (`forward_llm_provider_auth_headers: true`), each developer uses their own subscription/API key. LiteLLM still provides PII masking, audit logging, and per-session attribution — but billing is per-developer. This satisfies the "subscription-only" constraint mentioned in §14 while keeping the guardrails in place.
+
 **Why this pattern over HTTPS_PROXY:** the LLM-gateway pattern is documented and supported by Anthropic, requires no TLS interception, no CA distribution, and no MITM. The guardrails see the request body as structured JSON, not bytes to demangle from a TLS tunnel.
 
 ## 5. Repository Structure

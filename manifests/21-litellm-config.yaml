@@ -6,15 +6,15 @@ metadata:
 data:
   config.yaml: |
     model_list:
-      - model_name: "claude-sonnet-4-6"
+      - model_name: "claude-sonnet-4-6*"
         litellm_params:
           model: "anthropic/claude-sonnet-4-6"
           max_tokens: 4096
-      - model_name: "claude-opus-4-7"
+      - model_name: "claude-opus-4-7*"
         litellm_params:
           model: "anthropic/claude-opus-4-7"
           max_tokens: 4096
-      - model_name: "claude-haiku-4-5"
+      - model_name: "claude-haiku-4-5*"
         litellm_params:
           model: "anthropic/claude-haiku-4-5-20251001"
           max_tokens: 4096
