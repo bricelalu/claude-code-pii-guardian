@@ -10,9 +10,9 @@ data:
         litellm_params:
           model: "anthropic/claude-sonnet-4-6"
           context_window: 200000
-      - model_name: "claude-opus-4-7*"
+      - model_name: "claude-opus-4-8*"
         litellm_params:
-          model: "anthropic/claude-opus-4-7"
+          model: "anthropic/claude-opus-4-8"
           context_window: 200000
       - model_name: "claude-haiku-4-5*"
         litellm_params:

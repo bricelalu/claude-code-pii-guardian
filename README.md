@@ -225,21 +225,24 @@ In production, replace the `ClusterIssuer: selfsigned` with Let's Encrypt or you
 
 ## 5. Repository Structure
 
+```
 pii-guardian/
 ├── README.md
+├── LICENSE
 ├── Taskfile.yml
-├── .env.example                        # template for ANTHROPIC_API_KEY
+├── .env.example                        # template for ANTHROPIC_API_KEY + LITELLM_MASTER_KEY
 ├── k3d/
-│   └── cluster.yaml
+│   └── cluster.yaml                    # k3d cluster definition (host port mapping)
 ├── manifests/
 │   ├── 00-namespace.yaml
 │   ├── 10-presidio-analyzer.yaml
 │   ├── 11-presidio-anonymizer.yaml
-│   ├── 21-litellm-config.yaml         # ConfigMap with guardrail YAML
-│   ├── 22-litellm.yaml                # Deployment + Service
-│   ├── 15-traefik-config.yaml         # HelmChartConfig — hostPort 80/443 for k3d
-│   ├── 25-certificate-issuer.yaml     # cert-manager ClusterIssuer + Certificate
-│   └── 26-litellm-ingress.yaml        # Traefik Ingress (HTTPS + HTTP)
+│   ├── 15-traefik-config.yaml          # HelmChartConfig — hostPort 80/443 for k3d
+│   ├── 21-litellm-config.yaml          # ConfigMap with guardrail YAML
+│   ├── 22-litellm.yaml                 # Deployment + Service
+│   ├── 25-certificate-issuer.yaml      # cert-manager ClusterIssuer + Certificate
+│   ├── 26-litellm-ingress.yaml         # Traefik Ingress (HTTPS + HTTP)
+│   └── 30-postgres.yaml
 ├── demo/
 │   ├── scenario-mask.sh
 │   ├── scenario-audit.sh
@@ -247,6 +250,7 @@ pii-guardian/
 │   └── show-evidence.sh
 └── docs/
     └── notes.md
+```
 
 ## 6. Component Specifications
 ### 6.1 K3D Cluster
@@ -283,8 +287,9 @@ pii-guardian/
   - LITELLM_LOG=DEBUG
 - Args: ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
 ### 6.5 LiteLLM Configuration
-The ConfigMap litellm-config contains config.yaml:
+The ConfigMap `litellm-config` contains `config.yaml`:
 
+```yaml
 model_list:
   - model_name: "claude-*"
     litellm_params:
@@ -327,6 +332,8 @@ guardrails:
 litellm_settings:
   set_verbose: true
   json_logs: true
+```
+
 Claude Code sends these attribution headers on every request: X-Claude-Code-Session-Id, X-Claude-Code-Agent-Id, X-Claude-Code-Parent-Agent-Id. The implementer must verify they appear in LiteLLM logs (they typically do with set_verbose: true and json_logs: true). If not, add the appropriate LiteLLM logging config to capture inbound headers. These are documented in the Claude Code LLM gateway docs and are essential for per-session DPO audit.
 
 ### 6.6 cert-manager & TLS Ingress
