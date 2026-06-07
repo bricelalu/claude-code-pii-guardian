@@ -4,8 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export ANTHROPIC_BASE_URL="http://localhost:4000"
-export ANTHROPIC_AUTH_TOKEN="sk-poc-local-only"
+export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-http://litellm.local:8080}"
+export ANTHROPIC_AUTH_TOKEN="${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is not set — copy .env.example to .env}"
 
 PROMPT='Our team meeting is scheduled for next Tuesday at our Paris office. Sarah will present the Q3 forecast.'
 
