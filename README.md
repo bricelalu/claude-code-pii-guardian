@@ -1,5 +1,10 @@
 # PII-Guardian — PII-Aware AI Gateway for Claude Code
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-proof%20of%20concept-orange.svg)]()
+
+> **Not intended for production use.** This is a local proof-of-concept built for portfolio and learning purposes. It uses self-signed certificates, a single-replica cluster, no persistent storage, and hardcoded demo credentials. Do not expose it to a network or use it to process real personal data.
+
 A local POC that validates a GDPR defense-in-depth architecture: PII is detected, masked, and
 selectively blocked by a LiteLLM + Microsoft Presidio gateway **before prompts leave your perimeter**.
 
@@ -193,7 +198,7 @@ The diagram shows two auth paths supported by `forward_llm_provider_auth_headers
 ### Why This Matters
 
 - **POC (this project):** Uses Proxy Mode — one shared API key from the Kubernetes Secret. Simpler for demo. Cost is centralized.
-- **Production BYOK:** When enabled (`forward_llm_provider_auth_headers: true`), each developer uses their own subscription/API key. LiteLLM still provides PII masking, audit logging, and per-session attribution — but billing is per-developer. This satisfies the "subscription-only" constraint mentioned in §14 while keeping the guardrails in place.
+- **Production BYOK:** When enabled (`forward_llm_provider_auth_headers: true`), each developer uses their own subscription/API key. LiteLLM still provides PII masking, audit logging, and per-session attribution — but billing is per-developer. This satisfies the "subscription-only" constraint.
 
 **Why this pattern over HTTPS_PROXY:** the LLM-gateway pattern is documented and supported by Anthropic, requires no TLS interception, no CA distribution, and no MITM. The guardrails see the request body as structured JSON, not bytes to demangle from a TLS tunnel.
 
@@ -230,7 +235,6 @@ pii-guardian/
 │   ├── 00-namespace.yaml
 │   ├── 10-presidio-analyzer.yaml
 │   ├── 11-presidio-anonymizer.yaml
-│   ├── 20-litellm-secret.yaml.tmpl    # template; sealed by Taskfile from .env
 │   ├── 21-litellm-config.yaml         # ConfigMap with guardrail YAML
 │   ├── 22-litellm.yaml                # Deployment + Service
 │   ├── 15-traefik-config.yaml         # HelmChartConfig — hostPort 80/443 for k3d
@@ -447,41 +451,3 @@ Anthropic's official documentation explicitly warns that **LiteLLM PyPI versions
 - The README.md must contain a "Supply chain" section explicitly forbidding pip install litellm for any reason, including local development.
 - Presidio images come from mcr.microsoft.com (Microsoft-controlled registry) and must also be pinned by digest.
 This is non-negotiable. A PII protection layer compromised by malware is strictly worse than no PII protection layer.
-
-## 14. Production Authentication: The Subscription-Only Constraint
-A common Enterprise scenario: an organization holds N developer subscriptions for Claude Code and explicitly wants to avoid metered API-key billing in production (subscriptions are flat-rate; Bedrock or API would multiply costs).
-**The honest finding from LiteLLM documentation:** LiteLLM always requires an Anthropic API key (or AWS/GCP credentials) to authenticate outbound to api.anthropic.com. The "pass-through" endpoint pattern (/anthropic/*) does not forward the client's subscription OAuth token — it swaps it for LiteLLM's configured provider credentials. This is consistent across both the unified /v1/messages and pass-through /anthropic/v1/messages routes.
-Three viable production paths, evaluated:
-### Option A — Negotiate Enterprise API key allocation (lowest friction)
-Ask the Anthropic CSM whether the existing Enterprise contract includes API key allocation for centralized gateway use, billed under the existing commercial terms rather than metered separately. Many Enterprise contracts include this. A LiteLLM gateway then uses these allocated keys; developers keep their per-seat subscriptions for Claude Code features (Skills, sub-agents, hooks, web search). Cost: one phone call. Resolution time: days.
-### Option B — Build a custom forward proxy (no API key, higher engineering cost)
-Implement a small forward proxy (typically Go, ~1000–1500 lines) that:
-- Receives traffic via HTTPS_PROXY from each Claude Code client
-- Terminates TLS using an intermediate CA signed by the organization's root CA (already in the OS trust store of corporate laptops)
-- Calls Presidio inline for PII detection and masking
-- Re-establishes TLS to api.anthropic.com, preserving the client's subscription OAuth bearer untouched
-- Handles SSE streaming for response bodies
-This is the only architecture that fully preserves subscription auth end-to-end without an API key. Cost: 2–3 weeks of development plus ongoing operations.
-### Option C — Client-side Claude Code hooks (minimal infrastructure)
-Deploy a local UserPromptSubmit hook on every laptop via MDM that calls a Presidio service and warns/blocks before submission. No central enforcement, no central audit; defense in depth only. Cost: lowest. Audit power: lowest.
-**Recommended sequence:** call the CSM (Option A) before committing any engineering. If Option A is unavailable, Option B becomes the central control with Option C as defense in depth. This decision is out of scope for the POC itself, which validates the masking architecture regardless of which auth model production ultimately uses.
-
-## 15. Out-of-Scope (deliberately deferred)
-Not for this POC; list in docs/notes.md for future PRDs:
-- Custom recognizers for organization-specific entities (national IDs, customer IDs, internal hostnames)
-- Non-English Presidio language models
-- Production cluster manifests with secret-management integration (Vault/External Secrets), egress policy, sticky sessions for placeholder restoration across replicas
-- Observability integration (Datadog forwarder, Langfuse self-hosted)
-- Multi-tenant policies per team
-- Restoration of masked tokens in Claude's responses (Presidio replace operation with reverse map)
-- CI/CD pipeline for the gateway image and config
-- The production authentication paths from section 14
-- mTLS authentication between Claude Code and the gateway (CLAUDE_CODE_CLIENT_CERT / CLAUDE_CODE_CLIENT_KEY) — useful for per-dev gateway authentication in production, irrelevant for local POC
-
-## 16. Success Definition
-This POC succeeds the moment a 90-second demo can be shown containing:
-- A real Claude Code CLI prompt with visible PII
-- A live kubectl logs view proving the PII was masked or blocked before reaching Anthropic
-- A clear audit-layer detection on a borderline prompt
-- A visible X-Claude-Code-Session-Id in the logs proving per-session attribution is possible
-Anything beyond this output is out of scope. If the POC produces this evidence, the masking architecture is validated and the conversation moves to production rollout — starting with the authentication question in section 14.
