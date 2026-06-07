@@ -8,7 +8,8 @@ vars:
   LITELLM_IMAGE: ghcr.io/berriai/litellm:main-stable
   PRESIDIO_ANALYZER_IMAGE: mcr.microsoft.com/presidio-analyzer:latest
   PRESIDIO_ANONYMIZER_IMAGE: mcr.microsoft.com/presidio-anonymizer:latest
-  PF_PID_FILE: /tmp/pii-guardian-pf.pid
+  LITELLM_HTTP_URL: http://litellm.local:8080
+  LITELLM_HTTPS_URL: https://litellm.local:8443
 
 # ─────────────────────────────────────────────────────────────────
 # Supply chain tasks
@@ -113,7 +114,13 @@ tasks:
 
         if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
           echo "ERROR: ANTHROPIC_API_KEY is not set." >&2
-          echo "  Copy .env.example to .env and set your Anthropic API key." >&2
+          echo "  Copy .env.example to .env and fill in both keys." >&2
+          exit 1
+        fi
+
+        if [ -z "${LITELLM_MASTER_KEY:-}" ]; then
+          echo "ERROR: LITELLM_MASTER_KEY is not set." >&2
+          echo "  Copy .env.example to .env and fill in both keys." >&2
           exit 1
         fi
 
@@ -133,18 +140,34 @@ tasks:
         echo "Applying manifests..."
         kubectl apply -f manifests/00-namespace.yaml
 
+        # Install cert-manager (required for TLS)
+        echo "Installing cert-manager..."
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+        echo "Waiting for cert-manager to be ready..."
+        kubectl rollout status deployment/cert-manager -n cert-manager --timeout=120s 2>/dev/null || true
+        kubectl rollout status deployment/cert-manager-webhook -n cert-manager --timeout=120s 2>/dev/null || true
+        sleep 3 # Give issuers time to settle
+
         # Create secret directly — no envsubst required
         kubectl create secret generic litellm-secrets \
           -n "{{.NAMESPACE}}" \
           --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
-          --from-literal=LITELLM_MASTER_KEY="sk-poc-local-only" \
+          --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
           --save-config \
           --dry-run=client -o yaml | kubectl apply -f -
+
+        # Configure Traefik to bind ports 80/443 on the node (enables k3d host port mapping)
+        kubectl apply -f manifests/15-traefik-config.yaml
+        echo "Waiting for Traefik to apply new config..."
+        kubectl rollout status deployment/traefik -n kube-system --timeout=90s 2>/dev/null || true
 
         kubectl apply -f manifests/21-litellm-config.yaml
         kubectl apply -f manifests/10-presidio-analyzer.yaml
         kubectl apply -f manifests/11-presidio-anonymizer.yaml
         kubectl apply -f manifests/22-litellm.yaml
+        kubectl apply -f manifests/25-certificate-issuer.yaml
+        kubectl apply -f manifests/26-litellm-ingress.yaml
+        kubectl apply -f manifests/30-postgres.yaml
 
         # Wait for deployments.
         # First run pulls images inside k3d's own containerd (not host Docker cache).
@@ -155,8 +178,14 @@ tasks:
         kubectl rollout status deployment/presidio-anonymizer -n "{{.NAMESPACE}}" --timeout=300s
         kubectl rollout status deployment/litellm             -n "{{.NAMESPACE}}" --timeout=300s
 
+        # Wait for certificate to be issued
+        echo "Waiting for TLS certificate to be issued..."
+        kubectl wait --for=condition=ready certificate/litellm-tls -n "{{.NAMESPACE}}" --timeout=60s 2>/dev/null || echo "⚠ Certificate may still be issuing"
+
         echo ""
         echo "✓ Gateway stack is ready."
+        echo "  HTTP:  {{.LITELLM_HTTP_URL}}"
+        echo "  HTTPS: {{.LITELLM_HTTPS_URL}} (self-signed cert, use -k)"
 
   down:
     desc: Stop the K3D cluster (preserves state)
@@ -174,7 +203,7 @@ tasks:
 # ─────────────────────────────────────────────────────────────────
 
   status:
-    desc: Pod status + last 20 log lines + LiteLLM health check
+    desc: Pod status + last 20 log lines + LiteLLM health check via ingress
     cmds:
       - |
         set -euo pipefail
@@ -184,23 +213,23 @@ tasks:
         echo "=== LiteLLM logs (last 20 lines) ==="
         kubectl logs -n "{{.NAMESPACE}}" -l app=litellm --tail=20 2>/dev/null || echo "(no logs yet)"
         echo ""
-        echo "=== LiteLLM /health ==="
-        PF_PID=""
-        kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4001:4000 &>/dev/null &
-        PF_PID=$!
-        sleep 2
-        curl -sf http://localhost:4001/health | (command -v jq &>/dev/null && jq . || cat) || echo "(health check failed)"
-        kill "$PF_PID" 2>/dev/null || true
+        echo "=== LiteLLM /health (via ingress) ==="
+        curl -sf "{{.LITELLM_HTTP_URL}}/health/liveliness" | (command -v jq &>/dev/null && jq . || cat) || echo "(health check failed — is the ingress up?)"
 
   logs:
     desc: Follow LiteLLM logs
     cmds:
       - kubectl logs -n "{{.NAMESPACE}}" -l app=litellm -f
 
-  port-forward:
-    desc: Forward localhost:4000 → gateway/litellm:4000 (foreground, blocks)
+  reload-config:
+    desc: Re-apply LiteLLM config and rolling-restart the deployment
     cmds:
-      - kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4000:4000
+      - |
+        set -euo pipefail
+        kubectl apply -f manifests/21-litellm-config.yaml
+        kubectl rollout restart deployment/litellm -n "{{.NAMESPACE}}"
+        kubectl rollout status deployment/litellm -n "{{.NAMESPACE}}" --timeout=120s
+        echo "✓ Config reloaded — gateway still reachable at {{.LITELLM_HTTP_URL}}"
 
 # ─────────────────────────────────────────────────────────────────
 # Demo
@@ -228,18 +257,11 @@ tasks:
         # ── Bring the stack up (idempotent) ─────────────────────
         task up
 
-        # ── Wait for LiteLLM /health ─────────────────────────────
-        echo "Waiting for LiteLLM /health (up to 60s)..."
-        kubectl port-forward -n "{{.NAMESPACE}}" svc/litellm 4000:4000 &>/dev/null &
-        PF_PID=$!
-        echo "$PF_PID" > "{{.PF_PID_FILE}}"
-
-        # Cleanup on exit (including Ctrl-C)
-        trap 'kill "$PF_PID" 2>/dev/null; rm -f "{{.PF_PID_FILE}}"; echo ""; echo "Port-forward stopped."' EXIT INT TERM
-
+        # ── Wait for LiteLLM health via ingress ──────────────────
+        echo "Waiting for LiteLLM to be reachable via ingress (up to 60s)..."
         HEALTHY=0
         for i in $(seq 1 30); do
-          if curl -sf http://localhost:4000/health > /dev/null 2>&1; then
+          if curl -sf "{{.LITELLM_HTTP_URL}}/health/liveliness" > /dev/null 2>&1; then
             HEALTHY=1
             break
           fi
@@ -262,8 +284,8 @@ tasks:
         echo "│  Claude Code is routing through the local gateway.      │"
         echo "│  Export these in another shell to test manually:        │"
         echo "│                                                         │"
-        echo "│    export ANTHROPIC_BASE_URL=http://localhost:4000      │"
-        echo "│    export ANTHROPIC_AUTH_TOKEN=sk-poc-local-only        │"
+        echo "│    export ANTHROPIC_BASE_URL={{.LITELLM_HTTP_URL}}      │"
+        echo "│    export ANTHROPIC_AUTH_TOKEN=${LITELLM_MASTER_KEY}        │"
         echo "└─────────────────────────────────────────────────────────┘"
         echo ""
 

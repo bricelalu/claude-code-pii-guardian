@@ -70,7 +70,7 @@ authentication options (including the subscription-only path).
 | `task verify-images` | Re-pull and verify digests match manifests |
 | `task status` | Pod status + last 20 log lines + health check |
 | `task logs` | Follow LiteLLM logs |
-| `task port-forward` | Forward localhost:4000 → gateway (foreground) |
+| `task reload-config` | Re-apply LiteLLM config and rolling-restart (zero downtime) |
 
 ---
 
@@ -104,7 +104,6 @@ Stay tight on scope. Do **not**:
 - Add Postgres, Redis, or persistent volumes. Everything is ephemeral.
 - Write custom Python guardrails. Use LiteLLM's built-in presidio guardrail only.
 - Implement a mock Anthropic endpoint. The demo hits the real Anthropic API.
-- Add TLS, ingress, or cert-manager. Plain HTTP via kubectl port-forward is fine for the POC.
 - Add French (fr) or other non-English Presidio support. English-only.
 - Add custom recognizers (national ID schemes, customer-specific IDs). Use Presidio defaults.
 - **Install LiteLLM via pip install litellm.** See section 13 — only the official container image is acceptable.
@@ -115,14 +114,18 @@ The integration follows the officially documented LLM gateway pattern: Claude Co
 
 ```mermaid
 graph TD
-    CLI["🖥️ Claude Code CLI"]
+    CLI["🖥️ Claude Code CLI<br/>ANTHROPIC_BASE_URL=http://litellm.local:8080"]
     
     CLI1["Auth Option 1:<br/>x-litellm-api-key=sk-xxx"]
     CLI2["Auth Option 2 BYOK:<br/>x-api-key=sk-ant-xxx<br/>x-litellm-api-key=sk-xxx"]
     
-    PF["🔗 kubectl port-forward<br/>localhost:4000 → svc/litellm:4000"]
+    PF["🚦 k3d host port mapping<br/>localhost:8080 → traefik:80<br/>localhost:8443 → traefik:443"]
     
-    K3D["☸️ K3D Cluster<br/>Namespace: gateway"]
+    K3D["☸️ K3D Cluster<br/>Namespace: gateway<br/>+ cert-manager"]
+    
+    CERT["🔐 cert-manager<br/>Self-Signed Certificate<br/>litellm.local"]
+    
+    TRAEFIK["🚦 Traefik Ingress<br/>Port 443 | TLS termination<br/>Host: litellm.local"]
     
     LLM["⚡ LiteLLM Proxy<br/>Port 4000 | /v1/messages"]
     
@@ -143,8 +146,11 @@ graph TD
     CLI --> CLI2
     CLI1 --> PF
     CLI2 --> PF
-    PF -->|localhost:4000| K3D
-    K3D --> LLM
+    PF -->|HTTP/HTTPS| K3D
+    K3D --> CERT
+    K3D --> TRAEFIK
+    CERT -->|Signs| TRAEFIK
+    TRAEFIK -->|Route| LLM
     
     LLM --> PRE
     LLM --> AUDIT
@@ -163,6 +169,8 @@ graph TD
     style CLI2 fill:#bbdefb
     style PF fill:#f3e5f5
     style K3D fill:#fff3e0
+    style CERT fill:#ffe0b2
+    style TRAEFIK fill:#ffccbc
     style LLM fill:#fce4ec
     style PRE fill:#ffebee
     style AUDIT fill:#f1f8e9
@@ -179,8 +187,8 @@ The diagram shows two auth paths supported by `forward_llm_provider_auth_headers
 
 | Mode | Use Case | Header | How It Works |
 |------|----------|--------|--------------|
-| **Proxy Mode** (POC default) | Centralized auth, shared costs | `x-litellm-api-key=sk-poc-local-only` | LiteLLM uses its Kubernetes Secret API key; client auth is just to unlock the proxy. |
-| **BYOK** (Bring Your Own Key) | Client pays directly, audit per-developer | `x-api-key=sk-ant-...`<br/>`x-litellm-api-key=sk-poc-local-only` | LiteLLM forwards the client's API key to Anthropic, overriding the proxy key. |
+| **Proxy Mode** (POC default) | Centralized auth, shared costs | `x-litellm-api-key=sk-poc-...` | LiteLLM uses its Kubernetes Secret API key; client auth is just to unlock the proxy. |
+| **BYOK** (Bring Your Own Key) | Client pays directly, audit per-developer | `x-api-key=sk-ant-...`<br/>`x-litellm-api-key=sk-poc-...` | LiteLLM forwards the client's API key to Anthropic, overriding the proxy key. |
 
 ### Why This Matters
 
@@ -188,6 +196,27 @@ The diagram shows two auth paths supported by `forward_llm_provider_auth_headers
 - **Production BYOK:** When enabled (`forward_llm_provider_auth_headers: true`), each developer uses their own subscription/API key. LiteLLM still provides PII masking, audit logging, and per-session attribution — but billing is per-developer. This satisfies the "subscription-only" constraint mentioned in §14 while keeping the guardrails in place.
 
 **Why this pattern over HTTPS_PROXY:** the LLM-gateway pattern is documented and supported by Anthropic, requires no TLS interception, no CA distribution, and no MITM. The guardrails see the request body as structured JSON, not bytes to demangle from a TLS tunnel.
+
+### TLS & cert-manager
+
+The POC now includes **production-grade TLS termination** using cert-manager and self-signed certificates:
+
+- **cert-manager** automatically installs and manages certificates in Kubernetes
+- **Traefik ingress controller** terminates TLS at port 443
+- **Self-signed issuer** provisions certificates for `litellm.local` (automatically in K3D)
+
+**For local development** (no port-forward needed):
+```bash
+# k3d maps host ports directly via the built-in loadbalancer
+export ANTHROPIC_BASE_URL=http://litellm.local:8080   # HTTP — no cert needed
+# or HTTPS (self-signed, use -k with curl):
+export ANTHROPIC_BASE_URL=https://litellm.local:8443
+export ANTHROPIC_AUTH_TOKEN=sk-xxx
+```
+
+The host port mapping (`8080:80`, `8443:443`) is declared in `k3d/cluster.yaml`. A `HelmChartConfig` (`manifests/15-traefik-config.yaml`) configures Traefik to bind `hostPort: 80/443` on the server node, so traffic reaches Traefik without any port-forward. Add `127.0.0.1 litellm.local` to `/etc/hosts` (already present if you've run `task up`).
+
+In production, replace the `ClusterIssuer: selfsigned` with Let's Encrypt or your organization's CA.
 
 ## 5. Repository Structure
 
@@ -203,7 +232,10 @@ pii-guardian/
 │   ├── 11-presidio-anonymizer.yaml
 │   ├── 20-litellm-secret.yaml.tmpl    # template; sealed by Taskfile from .env
 │   ├── 21-litellm-config.yaml         # ConfigMap with guardrail YAML
-│   └── 22-litellm.yaml                # Deployment + Service
+│   ├── 22-litellm.yaml                # Deployment + Service
+│   ├── 15-traefik-config.yaml         # HelmChartConfig — hostPort 80/443 for k3d
+│   ├── 25-certificate-issuer.yaml     # cert-manager ClusterIssuer + Certificate
+│   └── 26-litellm-ingress.yaml        # Traefik Ingress (HTTPS + HTTP)
 ├── demo/
 │   ├── scenario-mask.sh
 │   ├── scenario-audit.sh
@@ -216,8 +248,10 @@ pii-guardian/
 ### 6.1 K3D Cluster
 - Single-node cluster named claude-gateway-poc
 - K3s version: latest stable (pin in k3d/cluster.yaml)
-- Disable Traefik (--disable=traefik); no ServiceLB needed
-- Host connectivity via kubectl port-forward only
+- **Traefik enabled** (default; used for ingress — HTTP port 8080, HTTPS port 8443)
+- ServiceLB (Klipper) disabled — the Kubernetes-level IP allocator for LoadBalancer Services is not needed here
+- Host connectivity via k3d's nginx sidecar container, which maps `localhost:8080→node:80` and `localhost:8443→node:443` at the Docker layer (declared in `k3d/cluster.yaml`)
+- Traefik configured via `HelmChartConfig` to bind `hostPort: 80/443` on the server node so the nginx sidecar can reach it
 ### 6.2 Presidio Analyzer
 - Image: mcr.microsoft.com/presidio-analyzer (pin to a specific tag and digest at scaffolding time)
 - Replicas: 1
@@ -238,7 +272,7 @@ pii-guardian/
 - Service: ClusterIP, port 4000
 - Required env (from Secret litellm-secrets):
   - ANTHROPIC_API_KEY — Anthropic API key used by LiteLLM to call Anthropic
-  - LITELLM_MASTER_KEY=sk-poc-local-only (the value Claude Code will send as ANTHROPIC_AUTH_TOKEN)
+  - LITELLM_MASTER_KEY — proxy key; the value Claude Code sends as ANTHROPIC_AUTH_TOKEN (see .env)
 - Required env (from ConfigMap or inline):
   - PRESIDIO_ANALYZER_API_BASE=http://presidio-analyzer.gateway.svc.cluster.local:3000
   - PRESIDIO_ANONYMIZER_API_BASE=http://presidio-anonymizer.gateway.svc.cluster.local:3000
@@ -291,6 +325,25 @@ litellm_settings:
   json_logs: true
 Claude Code sends these attribution headers on every request: X-Claude-Code-Session-Id, X-Claude-Code-Agent-Id, X-Claude-Code-Parent-Agent-Id. The implementer must verify they appear in LiteLLM logs (they typically do with set_verbose: true and json_logs: true). If not, add the appropriate LiteLLM logging config to capture inbound headers. These are documented in the Claude Code LLM gateway docs and are essential for per-session DPO audit.
 
+### 6.6 cert-manager & TLS Ingress
+**cert-manager (v1.13.0 or later):**
+- Installs automatically via official release manifest (task up applies it from GitHub)
+- Creates a self-signed ClusterIssuer named "selfsigned"
+- Mounts certificates as Kubernetes Secrets
+
+**TLS Certificate (manifests/25-certificate-issuer.yaml):**
+- Self-signed certificate for `litellm.local` (and `litellm.gateway.svc.cluster.local` for in-cluster access)
+- Valid for 90 days; auto-renewal at 30-day mark
+- Stored in Secret `litellm-tls` in the gateway namespace
+
+**Traefik Ingress (manifests/26-litellm-ingress.yaml):**
+- Listens on port 443 (HTTPS)
+- Terminates TLS using the certificate from `litellm-tls`
+- Routes traffic to LiteLLM service (port 4000, internal plaintext)
+- Configured for Traefik annotations (router.entrypoints: websecure)
+
+**Why self-signed for the POC:** Simplifies local testing (no external CA needed, no DNS setup). In production, replace the `selfsigned` issuer with Let's Encrypt (via HTTP-01 or DNS-01 challenge) or your organization's internal CA.
+
 ## 7. Taskfile Requirements
 Taskfile.yml must define these tasks, each with a desc: field:
 | Task | Behavior |
@@ -301,7 +354,7 @@ Taskfile.yml must define these tasks, each with a desc: field:
 | task verify-images | Re-pull every image and verify the digest matches what is declared in manifests; fail if mismatch |
 | task status | Pod status + last 20 log lines + curl health check on LiteLLM |
 | task logs | kubectl logs -n gateway -l app=litellm -f |
-| task port-forward | Run port-forward in foreground (blocks) |
+| task reload-config | Re-apply LiteLLM ConfigMap and rolling-restart the deployment |
 | task demo | The headline task — see section 8 |
 task up must depend on task verify-images. Errors must surface clearly; avoid silent: true unless suppressing genuine noise.
 
@@ -309,24 +362,22 @@ task up must depend on task verify-images. Errors must surface clearly; avoid si
 Sequence:
 1. Verify .env exists with ANTHROPIC_API_KEY set; fail fast if not
 2. Run task up (idempotent — skip if already running)
-3. Wait for LiteLLM /health to return 200 (poll up to 60s)
-4. Start kubectl port-forward in background, capture PID, ensure cleanup on exit
-5. Display setup banner with required env vars for the operator's shell:
+3. Wait for LiteLLM `/health/liveliness` to return 200 via ingress (poll up to 60s)
+4. Display setup banner with required env vars for the operator's shell:
    ```
-   export ANTHROPIC_BASE_URL=http://localhost:4000
-   export ANTHROPIC_AUTH_TOKEN=sk-poc-local-only
+   export ANTHROPIC_BASE_URL=http://litellm.local:8080
+   export ANTHROPIC_AUTH_TOKEN=sk-xxx
    ```
-6. Run **Scenario 1: MASK** → demo/scenario-mask.sh
-7. Pause for keypress (read -n 1 -p "Press any key for Scenario 2...")
-8. Run **Scenario 2: AUDIT** → demo/scenario-audit.sh
-9. Pause
-10. Run **Scenario 3: BLOCK** → demo/scenario-block.sh
-11. Final banner: "Demo complete. Run task logs for the full audit trail."
-12. On exit (including Ctrl-C), kill the port-forward PID
+5. Run **Scenario 1: MASK** → demo/scenario-mask.sh
+6. Pause for keypress (read -n 1 -p "Press any key for Scenario 2...")
+7. Run **Scenario 2: AUDIT** → demo/scenario-audit.sh
+8. Pause
+9. Run **Scenario 3: BLOCK** → demo/scenario-block.sh
+10. Final banner: "Demo complete. Run task logs for the full audit trail."
 
 ## 9. Demo Scenarios
 Each scenario script must:
-- Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN for the claude invocation
+- Set `ANTHROPIC_BASE_URL=http://litellm.local:8080` and `ANTHROPIC_AUTH_TOKEN` for the claude invocation
 - Run claude -p "<prompt>" for non-interactive execution against the local gateway
 - Capture LiteLLM logs *during* the call (e.g., kubectl logs --since=10s snapshot after the call)
 - Print three blocks with clear visual separators:

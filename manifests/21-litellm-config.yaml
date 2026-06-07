@@ -9,15 +9,15 @@ data:
       - model_name: "claude-sonnet-4-6*"
         litellm_params:
           model: "anthropic/claude-sonnet-4-6"
-          max_tokens: 4096
+          context_window: 200000
       - model_name: "claude-opus-4-7*"
         litellm_params:
           model: "anthropic/claude-opus-4-7"
-          max_tokens: 4096
+          context_window: 200000
       - model_name: "claude-haiku-4-5*"
         litellm_params:
           model: "anthropic/claude-haiku-4-5-20251001"
-          max_tokens: 4096
+          context_window: 200000
 
     general_settings:
       master_key: "os.environ/LITELLM_MASTER_KEY"
@@ -58,5 +58,5 @@ data:
       forward_llm_provider_auth_headers: true
       set_verbose: true
       json_logs: true
-      max_tokens: 4096
       drop_params: true
+      disable_extended_context_check: true  # Add this

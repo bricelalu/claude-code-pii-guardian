@@ -18,7 +18,7 @@ spec:
           # DIGEST_NOT_PINNED — run: task pin-images
           # Supply chain: ONLY use ghcr.io/berriai/litellm. NEVER pip install litellm.
           # See README §Supply Chain — LiteLLM PyPI 1.82.7 and 1.82.8 contained credential-stealing malware.
-          image: ghcr.io/berriai/litellm:main-stable@sha256:29252f25ed1b538d44f6b76ec97412c5537a180b39ede744b9f3e86ffdd278f5
+          image: ghcr.io/berriai/litellm:main-stable@sha256:979dd4e19ab559c1f4daeb06a16def89ee6cba088eb41a88647b2a45285885cc
           args:
             - "--config"
             - "/app/config.yaml"
