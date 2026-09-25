@@ -1,0 +1,57 @@
+# RunPod serverless endpoint for the GLiNER2 Presidio analyzer.
+# Body of `POST https://api.runpod.io/v2/serverless` (RunPod REST v2), in YAML.
+# Create it with infra/runpod/create-endpoint.sh. Findings behind the model and
+# thresholds: docs/ner-model-benchmark.md.
+name: pii-guardian-analyzer-gliner2
+
+# Load balancer = plain HTTP to the worker (POST /analyze, GET /ping), which is
+# what LiteLLM's Presidio guardrail speaks. Fixed at creation; can't be changed later.
+type: LOAD_BALANCER
+
+# Built from bench/analyzers/gliner2/Dockerfile with
+# --build-arg REQUIREMENTS=gliner2/requirements-cuda-amd64.txt (linux/amd64, CUDA 12.8).
+# Pinned by digest; private on GHCR.
+image: ghcr.io/bricelalu/pii-guardian-analyzer-gliner2@sha256:933a216f413575fe36d16e7f7b5b330bb6bf6c5662d0212628f50c2528ca96f4
+
+# RunPod "Container Registry Auth" entry holding a GitHub classic token with only
+# read:packages. Account-specific ID (not a secret); replace it if you recreate the credential.
+registry: cmugyuchs00a1i8pu150v2nkz
+
+gpu:
+  # 16 GB tier ($0.58/h serverless) first, 24 GB tier ($0.69/h) as fallback.
+  # GLiNER2 (205M params) needs ~1-2 GB of VRAM.
+  pools: [AMPERE_16, AMPERE_24]
+  count: 1
+  # torch 2.10.0+cu128 in the image.
+  minCudaVersion: "12.8"
+
+# EU member states only (GDPR-tagged by RunPod): Romania, Czechia.
+dataCenterIds: [EU-RO-1, EU-CZ-1]
+
+# runpod_app.py answers GET /ping with 204 while the model loads, 200 once ready.
+entrypoint: [python, -m, gunicorn]
+cmd: [-w, "1", --threads, "4", --timeout, "300", -b, "0.0.0.0:3000", --chdir, /app, "runpod_app:application"]
+ports: ["3000/http"]
+env:
+  PORT: "3000"
+  PORT_HEALTH: "3000"
+  # gunicorn forks its worker after importing torch; an early CUDA probe in the master
+  # breaks the worker ("Cannot re-initialize CUDA in forked subprocess"). NVML-based
+  # availability checks don't initialize CUDA, and a fixed device skips Presidio's probe.
+  PYTORCH_NVML_BASED_CUDA_CHECK: "1"
+  PRESIDIO_DEVICE: cuda
+
+# Image is ~9.6 GB.
+disk: 20
+
+workers:
+  min: 0           # scale to zero: $0 when idle
+  max: 1
+  idleTimeout: 60  # seconds a worker stays warm (and billed) after its last request
+
+# Load balancers must scale on in-flight requests.
+scaling:
+  type: REQUEST_COUNT
+  requestCount: 4
+
+flashboot: "OFF"

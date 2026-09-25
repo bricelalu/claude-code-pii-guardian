@@ -18,7 +18,7 @@ spec:
           # DIGEST_NOT_PINNED — run: task pin-images
           # Supply chain: ONLY use ghcr.io/berriai/litellm. NEVER pip install litellm.
           # See README §Supply Chain — LiteLLM PyPI 1.82.7 and 1.82.8 contained credential-stealing malware.
-          image: ghcr.io/berriai/litellm:main-stable@sha256:979dd4e19ab559c1f4daeb06a16def89ee6cba088eb41a88647b2a45285885cc
+          image: ghcr.io/berriai/litellm:v1.102.1@sha256:87f34979b9f8cb274fac90ca8a4fdda07d8480de22755562a26adeb95ce20d02
           args:
             - "--config"
             - "/app/config.yaml"
@@ -33,12 +33,36 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: LITELLM_MASTER_KEY
+            # Required per README §6.4. Without it the pod has no Anthropic
+            # credential, so "Proxy Mode" (client sends only the master key)
+            # reaches Anthropic with no x-api-key and is rejected.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: ANTHROPIC_API_KEY
             - name: PRESIDIO_ANALYZER_API_BASE
               value: "http://presidio-analyzer.gateway.svc.cluster.local:3000"
             - name: PRESIDIO_ANONYMIZER_API_BASE
               value: "http://presidio-anonymizer.gateway.svc.cluster.local:3000"
             - name: LITELLM_LOG
               value: "DEBUG"
+            # LITELLM_RUST routes native Anthropic /v1/messages through the
+            # bundled Rust bridge. DISABLED: the bridge was broken for the
+            # anthropic provider in v1.100.1 — it ignored the api_key it was
+            # handed, so every call 401s. Verified in-pod: a real key and a
+            # garbage key both returned the identical
+            # "authentication_error: API key is invalid", while the Python path
+            # with that same key succeeded.
+            # It also never engaged on the proxy route (no x-litellm-rust
+            # response header, no bridge log lines, and no latency difference
+            # when toggled), so enabling it bought nothing and left every
+            # Anthropic request one upstream behaviour change away from
+            # failing. Not re-verified against v1.102.1 (nothing in the
+            # v1.101.0/v1.102.x release notes mentions the Rust bridge or
+            # Anthropic credential forwarding) — re-test before re-enabling.
+            # - name: LITELLM_RUST
+            #   value: "1"
             - name: DATABASE_URL
               value: "postgresql://litellm:litellm-poc@postgres.gateway.svc.cluster.local:5432/litellm"
           volumeMounts:

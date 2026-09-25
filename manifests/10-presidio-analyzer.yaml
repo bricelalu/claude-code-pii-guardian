@@ -1,3 +1,45 @@
+# presidio-analyzer: an auth-adding proxy in front of the GLiNER2 analyzer running on a
+# RunPod load-balancing endpoint (GPU, EU data centers, scale-to-zero).
+# LiteLLM's Presidio guardrail can't send an Authorization header, so this proxy adds
+# RunPod's bearer key. Same Service name, label and port as before, so LiteLLM's
+# PRESIDIO_ANALYZER_API_BASE and the CiliumNetworkPolicy are unchanged.
+# The previous in-cluster spaCy analyzer is in git history (see docs/ner-model-benchmark.md).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: presidio-analyzer-proxy
+  namespace: gateway
+data:
+  # Rendered at startup by the nginx image's envsubst step (templates -> conf.d).
+  default.conf.template: |
+    server {
+        listen 3000;
+
+        # Answered locally: probes must never wake (and bill) a RunPod GPU worker.
+        location = /health {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        location = /analyze {
+            proxy_pass https://${RUNPOD_ENDPOINT_ID}.api.runpod.ai/analyze;
+            proxy_set_header Host ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
+            proxy_set_header Authorization "Bearer ${RUNPOD_API_KEY}";
+            proxy_ssl_server_name on;
+            proxy_ssl_verify on;
+            proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+            proxy_connect_timeout 10s;
+            # Cold start (image pull + model load) can take minutes; LiteLLM waits up to 300 s.
+            proxy_read_timeout 300s;
+            client_max_body_size 30m;
+        }
+
+        location / {
+            return 404;
+        }
+    }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,32 +56,49 @@ spec:
         app: presidio-analyzer
     spec:
       containers:
-        - name: presidio-analyzer
+        - name: presidio-analyzer-proxy
           # DIGEST_NOT_PINNED — run: task pin-images
-          image: mcr.microsoft.com/presidio-analyzer:latest@sha256:286e3fa7f3a7426e775e8564fe1870f1ba8f999d3ab8bbb8cc46a44355d9d6e9
+          image: nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
           ports:
             - containerPort: 3000
+          env:
+            # Only render our own variables; nginx's $host etc. stay untouched.
+            - name: NGINX_ENVSUBST_FILTER
+              value: "^RUNPOD_"
+            - name: RUNPOD_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: runpod-analyzer
+                  key: RUNPOD_API_KEY
+            - name: RUNPOD_ENDPOINT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: runpod-analyzer
+                  key: RUNPOD_ENDPOINT_ID
+          volumeMounts:
+            - name: templates
+              mountPath: /etc/nginx/templates
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
+              cpu: 50m
+              memory: 32Mi
             limits:
-              cpu: "1"
-              memory: 2Gi
+              cpu: 500m
+              memory: 128Mi
           livenessProbe:
             httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 60
             periodSeconds: 15
-            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /health
               port: 3000
-            initialDelaySeconds: 60
             periodSeconds: 10
-            failureThreshold: 5
+      volumes:
+        - name: templates
+          configMap:
+            name: presidio-analyzer-proxy
 ---
 apiVersion: v1
 kind: Service

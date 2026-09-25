@@ -1,0 +1,42 @@
+{
+  "pools": {
+    "PERSON": [
+      "Giulia Rossi", "Marco Bianchi", "Francesca Romano", "Alessandro Ricci",
+      "Chiara Colombo", "Lorenzo Greco", "Martina Bruno", "Davide Gallo",
+      "Sara Conti", "Matteo De Luca", "Elena Mancini", "Federico Costa",
+      "Valentina Giordano", "Stefano Rizzo", "Alessia Lombardi", "Simone Moretti",
+      "Beatrice Barbieri", "Riccardo Fontana"
+    ],
+    "CITY": [
+      "Bologna", "Torino", "Napoli", "Palermo", "Genova", "Verona",
+      "Padova", "Trieste", "Bari", "Perugia", "Cagliari", "Parma"
+    ],
+    "ADDRESS": ["Via Roma 8", "Piazza del Duomo 3", "Via dei Mille 19", "Viale Europa 27"],
+    "COUNTRY": ["Italia", "Svizzera", "San Marino", "Malta"],
+    "EMAIL": [
+      "g.rossi@officina-digitale.it", "c.colombo@trasporti-aurora.it",
+      "d.gallo@banca-orizzonte.it", "e.mancini@studio-azzurro.it",
+      "s.rizzo@logistica-po.it", "b.barbieri@consulenza-delta.it"
+    ]
+  },
+  "text": {
+    "tf_header": "Infrastruttura del gateway di pagamento, non modificare senza revisione.",
+    "tf_var_desc": "Nome del cluster di metriche usato dal team piattaforma",
+    "tf_contact": "Persona da contattare in caso di incidente su questa istanza",
+    "ts_header": "Servizio di gestione degli utenti e dei loro indirizzi postali.",
+    "ts_missing_city": "Nessuna città trovata: restituiamo null invece di lanciare un errore",
+    "ts_seed_comment": "Dati dimostrativi, da rimuovere prima della messa in produzione",
+    "py_header": "Calcolo delle righe di fattura per i clienti aziendali.",
+    "py_rounding": "Arrotondamento bancario: aggiungiamo un epsilon per evitare errori in virgola mobile",
+    "py_loop": "Stampa ogni riga di fattura per un controllo manuale",
+    "go_header": "gestisce la spedizione dei pacchi e la validazione dei destinatari.",
+    "go_retry": "Riproviamo al massimo tre volte prima di rinunciare alla consegna",
+    "go_fixture": "Insiemi di dati usati dai test di integrazione",
+    "java_header": "Archivio clienti in memoria, usato in attesa del database.",
+    "java_seed": "Clienti di prova caricati all'avvio",
+    "java_lookup": "Ricerca senza distinzione tra maiuscole sul nome della città",
+    "rs_header": "Generazione delle fatture e calcolo dell'IVA per città.",
+    "rs_tax": "Aliquota IVA semplificata: venti per cento ovunque salvo città sconosciuta",
+    "rs_seed": "Fatture di esempio per la demo commerciale"
+  }
+}

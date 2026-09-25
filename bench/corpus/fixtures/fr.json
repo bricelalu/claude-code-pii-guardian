@@ -1,0 +1,42 @@
+{
+  "pools": {
+    "PERSON": [
+      "Jean-Baptiste Lefèvre", "Amélie Rousseau", "François Duchêne", "Céline Marchand",
+      "Hélène Giraud", "Thibault Mercier", "Élodie Fontaine", "Loïc Bernard",
+      "Margaux Lemaire", "Grégoire Vasseur", "Maëlle Robin", "Sébastien Carpentier",
+      "Noémie Perrin", "Aurélien Dubois", "Clémence Faure", "Yannick Le Goff",
+      "Solène Chevalier", "Benoît Lacroix"
+    ],
+    "CITY": [
+      "Lyon", "Bordeaux", "Marseille", "Toulouse", "Lille", "Nantes",
+      "Strasbourg", "Montpellier", "Rennes", "Grenoble", "Clermont-Ferrand", "Aix-en-Provence"
+    ],
+    "ADDRESS": ["12 rue de la République", "8 place Bellecour", "3 quai des Chartrons", "19 rue des Tanneurs"],
+    "COUNTRY": ["France", "Belgique", "Suisse", "Canada"],
+    "EMAIL": [
+      "jb.lefevre@atelier-numerique.fr", "c.marchand@transports-lumiere.fr",
+      "t.mercier@banque-horizon.fr", "m.lemaire@studio-azur.fr",
+      "n.perrin@logistique-rhone.fr", "y.legoff@armor-conseil.fr"
+    ]
+  },
+  "text": {
+    "tf_header": "Infrastructure de la passerelle de paiement, ne pas modifier sans revue.",
+    "tf_var_desc": "Nom du cluster de métriques utilisé par l'équipe plateforme",
+    "tf_contact": "Personne à contacter en cas d'incident sur cette instance",
+    "ts_header": "Service de gestion des utilisateurs et de leurs adresses postales.",
+    "ts_missing_city": "Pas de ville trouvée : on renvoie null plutôt que de lever une erreur",
+    "ts_seed_comment": "Données de démonstration, à retirer avant la mise en production",
+    "py_header": "Calcul des lignes de facture pour les clients professionnels.",
+    "py_rounding": "Arrondi bancaire : on ajoute un epsilon pour éviter les erreurs de flottants",
+    "py_loop": "Affiche chaque ligne de facture pour vérification manuelle",
+    "go_header": "gère l'expédition des colis et la validation des destinataires.",
+    "go_retry": "On réessaie trois fois au maximum avant d'abandonner la livraison",
+    "go_fixture": "Jeux de données utilisés par les tests d'intégration",
+    "java_header": "Dépôt en mémoire des clients, utilisé en attendant la base de données.",
+    "java_seed": "Clients de test chargés au démarrage",
+    "java_lookup": "Recherche insensible à la casse sur le nom de la ville",
+    "rs_header": "Génération des factures et calcul de la TVA par ville.",
+    "rs_tax": "Taux de TVA simplifié : vingt pour cent partout sauf ville inconnue",
+    "rs_seed": "Factures d'exemple pour la démo commerciale"
+  }
+}

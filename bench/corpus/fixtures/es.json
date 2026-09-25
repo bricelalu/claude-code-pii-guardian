@@ -1,0 +1,42 @@
+{
+  "pools": {
+    "PERSON": [
+      "Lucía Fernández", "Javier Morales", "Carmen Ruiz", "Alejandro Navarro",
+      "Marta Gil", "Sergio Ortega", "Paula Romero", "Diego Castillo",
+      "Elena Vázquez", "Raúl Serrano", "Nuria Delgado", "Iván Molina",
+      "Beatriz Herrera", "Álvaro Domínguez", "Rocío Cabrera", "Pablo Santana",
+      "Inés Prieto", "Tomás Aguilar"
+    ],
+    "CITY": [
+      "Sevilla", "Valencia", "Bilbao", "Zaragoza", "Málaga", "Granada",
+      "Salamanca", "Córdoba", "Alicante", "Valladolid", "Santander", "Pamplona"
+    ],
+    "ADDRESS": ["Calle Mayor 14", "Avenida de la Constitución 7", "Plaza del Pilar 3", "Calle de Alcalá 52"],
+    "COUNTRY": ["España", "México", "Argentina", "Chile"],
+    "EMAIL": [
+      "l.fernandez@taller-digital.es", "c.ruiz@transportes-sol.es",
+      "s.ortega@banco-horizonte.es", "e.vazquez@estudio-azul.es",
+      "i.molina@logistica-ebro.es", "p.santana@consultoria-atlas.es"
+    ]
+  },
+  "text": {
+    "tf_header": "Infraestructura de la pasarela de pago, no modificar sin revisión.",
+    "tf_var_desc": "Nombre del clúster de métricas usado por el equipo de plataforma",
+    "tf_contact": "Persona de contacto en caso de incidente en esta instancia",
+    "ts_header": "Servicio de gestión de usuarios y de sus direcciones postales.",
+    "ts_missing_city": "No se encontró ciudad: devolvemos null en lugar de lanzar un error",
+    "ts_seed_comment": "Datos de demostración, eliminar antes de pasar a producción",
+    "py_header": "Cálculo de las líneas de factura para clientes profesionales.",
+    "py_rounding": "Redondeo bancario: sumamos un épsilon para evitar errores de coma flotante",
+    "py_loop": "Muestra cada línea de factura para una comprobación manual",
+    "go_header": "gestiona el envío de paquetes y la validación de destinatarios.",
+    "go_retry": "Reintentamos como máximo tres veces antes de abandonar la entrega",
+    "go_fixture": "Conjuntos de datos usados por las pruebas de integración",
+    "java_header": "Repositorio de clientes en memoria, usado mientras llega la base de datos.",
+    "java_seed": "Clientes de prueba cargados al arrancar",
+    "java_lookup": "Búsqueda sin distinguir mayúsculas sobre el nombre de la ciudad",
+    "rs_header": "Generación de facturas y cálculo del IVA por ciudad.",
+    "rs_tax": "Tipo de IVA simplificado: veinte por ciento salvo ciudad desconocida",
+    "rs_seed": "Facturas de ejemplo para la demo comercial"
+  }
+}

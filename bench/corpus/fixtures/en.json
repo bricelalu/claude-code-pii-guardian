@@ -1,0 +1,42 @@
+{
+  "pools": {
+    "PERSON": [
+      "Oliver Thompson", "Charlotte Hughes", "Harriet Whitfield", "Samuel Okafor",
+      "Priya Raman", "Declan Murphy", "Eleanor Briggs", "Tobias Hartley",
+      "Grace Pemberton", "Nathaniel Cole", "Imogen Fairfax", "Callum Doherty",
+      "Rosalind Kerr", "Marcus Adeyemi", "Fiona McAllister", "Joshua Ellery",
+      "Beatrix Holloway", "Ruairi Brennan"
+    ],
+    "CITY": [
+      "Manchester", "Leeds", "Bristol", "Edinburgh", "Glasgow", "Cardiff",
+      "Liverpool", "Birmingham", "Sheffield", "Belfast", "Nottingham", "Brighton"
+    ],
+    "ADDRESS": ["14 Kingsway Road", "7 Riverside Crescent", "52 Queensway", "3 Harbour Lane"],
+    "COUNTRY": ["United Kingdom", "Ireland", "Australia", "New Zealand"],
+    "EMAIL": [
+      "o.thompson@northgate-labs.co.uk", "s.okafor@brightwater-freight.com",
+      "e.briggs@halcyon-bank.co.uk", "n.cole@mapleleaf-studio.com",
+      "r.kerr@thistle-logistics.co.uk", "b.holloway@kestrel-advisory.com"
+    ]
+  },
+  "text": {
+    "tf_header": "Payment gateway infrastructure, do not change without a review.",
+    "tf_var_desc": "Name of the metrics cluster used by the platform team",
+    "tf_contact": "Person to contact if this instance has an incident",
+    "ts_header": "Service that manages users and their postal addresses.",
+    "ts_missing_city": "No city found: return null rather than throwing",
+    "ts_seed_comment": "Demo data, remove before going to production",
+    "py_header": "Builds invoice lines for business customers.",
+    "py_rounding": "Banker's rounding: add an epsilon to avoid floating point errors",
+    "py_loop": "Print each invoice line for manual checking",
+    "go_header": "handles parcel shipping and recipient validation.",
+    "go_retry": "Retry at most three times before giving up on the delivery",
+    "go_fixture": "Datasets used by the integration tests",
+    "java_header": "In-memory customer store, used until the database is ready.",
+    "java_seed": "Test customers loaded at startup",
+    "java_lookup": "Case-insensitive lookup on the city name",
+    "rs_header": "Invoice generation and sales tax calculation per city.",
+    "rs_tax": "Simplified tax rate: twenty percent everywhere unless the city is unknown",
+    "rs_seed": "Sample invoices for the sales demo"
+  }
+}

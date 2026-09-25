@@ -5,19 +5,33 @@ metadata:
   namespace: gateway
 data:
   config.yaml: |
+    # Claude Code resolves its aliases client-side and sends the full model ID
+    # (verified: "/model sonnet" and "claude-sonnet-5[1m]" both arrive here as
+    # "claude-sonnet-5" — the "[1m]" suffix is stripped before the request is
+    # sent). So these bare IDs are what the gateway actually has to serve.
+    # The 1M context window is a client-side setting, not a gateway one.
     model_list:
-      - model_name: "claude-sonnet-4-6*"
+      - model_name: "claude-sonnet-5"
         litellm_params:
-          model: "anthropic/claude-sonnet-4-6"
-          context_window: 200000
-      - model_name: "claude-opus-4-8*"
+          model: "anthropic/claude-sonnet-5"
+      - model_name: "claude-opus-5"
         litellm_params:
-          model: "anthropic/claude-opus-4-8"
-          context_window: 200000
-      - model_name: "claude-haiku-4-5*"
+          model: "anthropic/claude-opus-5"
+      - model_name: "claude-fable-5-1"
+        litellm_params:
+          model: "anthropic/claude-fable-5-1"
+      - model_name: "claude-haiku-4-5-20251001"
         litellm_params:
           model: "anthropic/claude-haiku-4-5-20251001"
-          context_window: 200000
+
+    router_settings:
+      # Short aliases for clients that send them literally (curl, SDKs).
+      # Claude Code itself never sends these — it resolves them first.
+      model_group_alias:
+        "sonnet": "claude-sonnet-5"
+        "opus": "claude-opus-5"
+        "haiku": "claude-haiku-4-5-20251001"
+        "fable": "claude-fable-5-1"
 
     general_settings:
       master_key: "os.environ/LITELLM_MASTER_KEY"
@@ -29,12 +43,17 @@ data:
           mode: "pre_call"
           default_on: true
           presidio_language: "en"
+          # PERSON/LOCATION come from GLiNER2; cutoffs from docs/ner-model-benchmark.md
+          # (100% precision on code, held-out languages). Code tokens such as
+          # `fullName` score up to 0.81 and cloud regions (`us-east-1a`) up to 0.95.
           presidio_score_thresholds:
             ALL: 0.6
-            PERSON: 0.75
+            PERSON: 0.85
+            LOCATION: 0.96
           pii_entities_config:
             EMAIL_ADDRESS: "MASK"
             PERSON: "MASK"
+            LOCATION: "MASK"
             PHONE_NUMBER: "MASK"
             CREDIT_CARD: "BLOCK"
             IBAN_CODE: "BLOCK"

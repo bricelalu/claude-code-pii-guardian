@@ -2,3 +2,5 @@
 .env
 manifests/20-litellm-secret.yaml
 manifests/litellm-secret.yaml
+.pii-score-out/
+__pycache__/

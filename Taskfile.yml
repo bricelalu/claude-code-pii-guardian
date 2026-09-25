@@ -5,11 +5,12 @@ dotenv: ['.env']
 vars:
   CLUSTER_NAME: claude-gateway-poc
   NAMESPACE: gateway
-  LITELLM_IMAGE: ghcr.io/berriai/litellm:main-stable
+  LITELLM_IMAGE: ghcr.io/berriai/litellm:v1.102.1
   PRESIDIO_ANALYZER_IMAGE: mcr.microsoft.com/presidio-analyzer:latest
   PRESIDIO_ANONYMIZER_IMAGE: mcr.microsoft.com/presidio-anonymizer:latest
   LITELLM_HTTP_URL: http://litellm.local:8080
   LITELLM_HTTPS_URL: https://litellm.local:8443
+  CILIUM_VERSION: "1.16.5"
 
 # ─────────────────────────────────────────────────────────────────
 # Supply chain tasks
@@ -127,6 +128,12 @@ tasks:
         # Create cluster if it doesn't already exist
         if k3d cluster list --no-headers 2>/dev/null | grep -q "{{.CLUSTER_NAME}}"; then
           echo "Cluster '{{.CLUSTER_NAME}}' already exists — skipping creation."
+          if ! helm status cilium -n kube-system > /dev/null 2>&1; then
+            echo "ERROR: cluster exists but Cilium is not installed." >&2
+            echo "  The cluster was created before Cilium support was added." >&2
+            echo "  Run: task clean && task up" >&2
+            exit 1
+          fi
         else
           echo "Creating K3D cluster '{{.CLUSTER_NAME}}' ..."
           k3d cluster create --config k3d/cluster.yaml
@@ -135,6 +142,18 @@ tasks:
 
         # Point kubectl at the new cluster
         k3d kubeconfig merge "{{.CLUSTER_NAME}}" --kubeconfig-switch-context > /dev/null
+
+        # Install / upgrade Cilium CNI (must run before any workload pods are scheduled)
+        echo "Installing Cilium CNI {{.CILIUM_VERSION}}..."
+        helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+        helm upgrade --install cilium cilium/cilium \
+          --version "{{.CILIUM_VERSION}}" \
+          --namespace kube-system \
+          --set operator.replicas=1 \
+          --set kubeProxyReplacement=false \
+          --set dnsProxy.enableTransparentMode=false \
+          --wait --timeout=180s
+        echo "Cilium ready."
 
         # Apply manifests in order
         echo "Applying manifests..."
@@ -168,6 +187,7 @@ tasks:
         kubectl apply -f manifests/25-certificate-issuer.yaml
         kubectl apply -f manifests/26-litellm-ingress.yaml
         kubectl apply -f manifests/30-postgres.yaml
+        kubectl apply -f manifests/40-litellm-netpol.yaml
 
         # Wait for deployments.
         # First run pulls images inside k3d's own containerd (not host Docker cache).
@@ -230,6 +250,44 @@ tasks:
         kubectl rollout restart deployment/litellm -n "{{.NAMESPACE}}"
         kubectl rollout status deployment/litellm -n "{{.NAMESPACE}}" --timeout=120s
         echo "✓ Config reloaded — gateway still reachable at {{.LITELLM_HTTP_URL}}"
+
+  verify-netpol:
+    desc: Verify CiliumNetworkPolicy — allowed traffic passes, blocked traffic is dropped
+    cmds:
+      - |
+        set -euo pipefail
+        FAIL=0
+
+        # TCP probe executed inside the litellm pod (Python always available in the image)
+        conn() {
+          kubectl exec -n "{{.NAMESPACE}}" deploy/litellm -- \
+            python3 -c \
+            "import socket,sys;socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=4).close()" \
+            "$1" "$2" 2>/dev/null
+        }
+
+        echo ""
+        echo "=== CiliumNetworkPolicy — LiteLLM egress verification ==="
+        echo ""
+        echo "Allowed (must connect):"
+        conn presidio-analyzer.gateway.svc.cluster.local  3000 && echo "  ✓ ALLOWED  presidio-analyzer:3000   (internal)"  || { echo "  ✗ ALLOWED  presidio-analyzer:3000 — unexpectedly blocked";   FAIL=1; }
+        conn presidio-anonymizer.gateway.svc.cluster.local 3000 && echo "  ✓ ALLOWED  presidio-anonymizer:3000 (internal)"  || { echo "  ✗ ALLOWED  presidio-anonymizer:3000 — unexpectedly blocked"; FAIL=1; }
+        conn postgres.gateway.svc.cluster.local            5432 && echo "  ✓ ALLOWED  postgres:5432            (internal)"  || { echo "  ✗ ALLOWED  postgres:5432 — unexpectedly blocked";            FAIL=1; }
+        conn api.anthropic.com                              443  && echo "  ✓ ALLOWED  api.anthropic.com:443    (external HTTPS)" || { echo "  ✗ ALLOWED  api.anthropic.com:443 — unexpectedly blocked"; FAIL=1; }
+
+        echo ""
+        echo "Blocked (must NOT connect, 4s timeout each):"
+        conn api.anthropic.com  80  && { echo "  ✗ BLOCKED  api.anthropic.com:80  — leaked!"; FAIL=1; } || echo "  ✓ BLOCKED  api.anthropic.com:80  (HTTP blocked, HTTPS-only policy)"
+        conn www.google.com     443 && { echo "  ✗ BLOCKED  www.google.com:443    — production note: toFQDNs would restrict this"; } || echo "  ✓ BLOCKED  www.google.com:443    (unreachable — expected in k3d without route)"
+        conn 1.1.1.1            80  && { echo "  ✗ BLOCKED  1.1.1.1:80            — leaked!"; FAIL=1; } || echo "  ✓ BLOCKED  1.1.1.1:80            (non-HTTPS external blocked)"
+
+        echo ""
+        if [ "$FAIL" = "0" ]; then
+          echo "✓ All checks passed — CiliumNetworkPolicy is enforcing correctly."
+        else
+          echo "✗ Some checks failed — review policy or Cilium installation."
+          exit 1
+        fi
 
 # ─────────────────────────────────────────────────────────────────
 # Demo
@@ -311,3 +369,39 @@ tasks:
         echo "║  Run 'task logs' for the full audit trail.             ║"
         echo "╚══════════════════════════════════════════════════════════╝"
         echo ""
+
+# ─────────────────────────────────────────────────────────────────
+# PII detection scoring
+# ─────────────────────────────────────────────────────────────────
+
+  pii-score:
+    desc: Score Presidio's masking ratio and false-positive ratio across CSV, Markdown, and minified-JSON exports of a fake PII dataset
+    cmds:
+      - |
+        set -euo pipefail
+
+        # ── Prerequisites check ──────────────────────────────────
+        for bin in sqlite3 jq python3; do
+          if ! command -v "$bin" &>/dev/null; then
+            echo "ERROR: '$bin' not found in PATH." >&2
+            exit 1
+          fi
+        done
+
+        # ── Bring the stack up (idempotent) ─────────────────────
+        task up
+
+        bash scripts/pii-score/run.sh
+
+  pii-bench:
+    desc: Benchmark Presidio NER backends (spaCy, GLiNER, GLiNER2) on PERSON/LOCATION in generated source files (FR/EN/ES/IT)
+    cmds:
+      - |
+        set -euo pipefail
+        for bin in docker sqlite3 jq python3; do
+          if ! command -v "$bin" &>/dev/null; then
+            echo "ERROR: '$bin' not found in PATH." >&2
+            exit 1
+          fi
+        done
+        bash scripts/pii-score/bench.sh

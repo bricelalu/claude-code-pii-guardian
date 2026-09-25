@@ -1,0 +1,74 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: litellm
+  namespace: gateway
+spec:
+  endpointSelector:
+    matchLabels:
+      app: litellm
+  ingress:
+    # Only Traefik (ingress controller) may reach LiteLLM on port 4000
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            app.kubernetes.io/name: traefik
+      toPorts:
+        - ports:
+            - port: "4000"
+              protocol: TCP
+  egress:
+    # kube-dns — required for all in-cluster service discovery
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+    # Presidio Analyzer
+    - toEndpoints:
+        - matchLabels:
+            app: presidio-analyzer
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
+    # Presidio Anonymizer
+    - toEndpoints:
+        - matchLabels:
+            app: presidio-anonymizer
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
+    # Postgres (LiteLLM spend tracking)
+    - toEndpoints:
+        - matchLabels:
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # Anthropic API — external HTTPS only.
+    #
+    # Production intent (real Kubernetes cluster):
+    #   - toFQDNs:
+    #       - matchName: "api.anthropic.com"
+    #     toPorts:
+    #       - ports:
+    #           - port: "443"
+    #             protocol: TCP
+    #
+    # Cilium FQDN policies require the DNS proxy to intercept pod DNS queries.
+    # In k3d (Docker-in-Docker nodes), the eBPF/iptables hooks needed for DNS
+    # proxy redirect do not function — the FQDN cache stays empty. The policy
+    # below restricts external egress to HTTPS (port 443) only, which is the
+    # enforceable equivalent in this environment.
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

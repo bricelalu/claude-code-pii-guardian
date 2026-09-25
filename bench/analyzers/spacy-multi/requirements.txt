@@ -1,0 +1,5 @@
+# spaCy 3.8 pipelines matching the image's spacy==3.8.11. md size (as in Presidio's
+# own spacy_multilingual.yaml) to keep 4 loaded pipelines within Docker's memory.
+fr_core_news_md @ https://github.com/explosion/spacy-models/releases/download/fr_core_news_md-3.8.0/fr_core_news_md-3.8.0-py3-none-any.whl --hash=sha256:8a70d090a54ef77525c3ffa6a6195b9d365f2cf369ae1cd84ede93f3d709079e
+es_core_news_md @ https://github.com/explosion/spacy-models/releases/download/es_core_news_md-3.8.0/es_core_news_md-3.8.0-py3-none-any.whl --hash=sha256:478b8bb3f3e8eb149192f7d80e7cd64f990b7e9bccbc5329df41a57e86326be2
+it_core_news_md @ https://github.com/explosion/spacy-models/releases/download/it_core_news_md-3.8.0/it_core_news_md-3.8.0-py3-none-any.whl --hash=sha256:a731d2d8e7c5a7093ac42f88774ea2a2ad3d5809959eedee65632b3533f804ec
