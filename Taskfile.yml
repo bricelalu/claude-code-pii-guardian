@@ -6,7 +6,8 @@ vars:
   CLUSTER_NAME: claude-gateway-poc
   NAMESPACE: gateway
   LITELLM_IMAGE: ghcr.io/berriai/litellm:v1.102.1
-  PRESIDIO_ANALYZER_IMAGE: mcr.microsoft.com/presidio-analyzer:latest
+  # presidio-analyzer is an auth-adding proxy to the GLiNER2 analyzer on RunPod.
+  ANALYZER_PROXY_IMAGE: nginxinc/nginx-unprivileged:1.29-alpine
   PRESIDIO_ANONYMIZER_IMAGE: mcr.microsoft.com/presidio-anonymizer:latest
   LITELLM_HTTP_URL: http://litellm.local:8080
   LITELLM_HTTPS_URL: https://litellm.local:8443
@@ -44,7 +45,7 @@ tasks:
           echo "  ✓ ${pinned}"
         }
         pin "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
-        pin "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        pin "{{.ANALYZER_PROXY_IMAGE}}"   manifests/10-presidio-analyzer.yaml
         pin "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
         echo ""
         echo "Digests pinned. Review 'git diff manifests/' before committing."
@@ -66,7 +67,7 @@ tasks:
         }
 
         check_pinned "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
-        check_pinned "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        check_pinned "{{.ANALYZER_PROXY_IMAGE}}"   manifests/10-presidio-analyzer.yaml
         check_pinned "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
 
         [ "$FAIL" = "0" ] || exit 1
@@ -96,7 +97,7 @@ tasks:
         }
 
         verify "{{.LITELLM_IMAGE}}"             manifests/22-litellm.yaml
-        verify "{{.PRESIDIO_ANALYZER_IMAGE}}"   manifests/10-presidio-analyzer.yaml
+        verify "{{.ANALYZER_PROXY_IMAGE}}"   manifests/10-presidio-analyzer.yaml
         verify "{{.PRESIDIO_ANONYMIZER_IMAGE}}"  manifests/11-presidio-anonymizer.yaml
 
         [ "$FAIL" = "0" ] || exit 1
@@ -125,6 +126,12 @@ tasks:
           exit 1
         fi
 
+        if [ -z "${RUNPOD_API_KEY:-}" ] || [ -z "${RUNPOD_ENDPOINT_ID:-}" ]; then
+          echo "ERROR: RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID must be set in .env." >&2
+          echo "  The Presidio analyzer (GLiNER2) runs on RunPod — see README 'PII detection: GLiNER2 on a RunPod GPU'." >&2
+          exit 1
+        fi
+
         # Create cluster if it doesn't already exist
         if k3d cluster list --no-headers 2>/dev/null | grep -q "{{.CLUSTER_NAME}}"; then
           echo "Cluster '{{.CLUSTER_NAME}}' already exists — skipping creation."
@@ -146,11 +153,16 @@ tasks:
         # Install / upgrade Cilium CNI (must run before any workload pods are scheduled)
         echo "Installing Cilium CNI {{.CILIUM_VERSION}}..."
         helm repo add cilium https://helm.cilium.io/ 2>/dev/null || true
+        # Traefik is reached through hostPort 80/443; without kube-proxy replacement, Cilium only
+        # implements hostPort with nodePort+hostPort enabled (flannel's portmap is gone).
         helm upgrade --install cilium cilium/cilium \
           --version "{{.CILIUM_VERSION}}" \
           --namespace kube-system \
           --set operator.replicas=1 \
           --set kubeProxyReplacement=false \
+          --set nodePort.enabled=true \
+          --set hostPort.enabled=true \
+          --set rollOutCiliumPods=true \
           --set dnsProxy.enableTransparentMode=false \
           --wait --timeout=180s
         echo "Cilium ready."
@@ -172,6 +184,14 @@ tasks:
           -n "{{.NAMESPACE}}" \
           --from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
           --from-literal=LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY}" \
+          --save-config \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        # Separate secret: only the analyzer proxy needs the RunPod key; LiteLLM never sees it.
+        kubectl create secret generic runpod-analyzer \
+          -n "{{.NAMESPACE}}" \
+          --from-literal=RUNPOD_API_KEY="${RUNPOD_API_KEY}" \
+          --from-literal=RUNPOD_ENDPOINT_ID="${RUNPOD_ENDPOINT_ID}" \
           --save-config \
           --dry-run=client -o yaml | kubectl apply -f -
 

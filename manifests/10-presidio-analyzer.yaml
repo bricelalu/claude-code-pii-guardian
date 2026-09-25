@@ -23,9 +23,14 @@ data:
         }
 
         location = /analyze {
-            proxy_pass https://${RUNPOD_ENDPOINT_ID}.api.runpod.ai/analyze;
-            proxy_set_header Host ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
+            # Resolve at request time, IPv4 only: RunPod publishes AAAA records but the cluster
+            # has no IPv6 egress, so a startup-resolved upstream wastes attempts on unreachable IPs.
+            resolver kube-dns.kube-system.svc.cluster.local ipv6=off valid=300s;
+            set $runpod_upstream ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
+            proxy_pass https://$runpod_upstream/analyze;
+            proxy_set_header Host $runpod_upstream;
             proxy_set_header Authorization "Bearer ${RUNPOD_API_KEY}";
+            proxy_ssl_name $runpod_upstream;
             proxy_ssl_server_name on;
             proxy_ssl_verify on;
             proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;

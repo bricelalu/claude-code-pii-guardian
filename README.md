@@ -256,10 +256,20 @@ LiteLLM guardrail ──► presidio-analyzer Service (k3d, same name/port as be
 The endpoint is defined in [`infra/runpod/endpoint.yaml`](infra/runpod/endpoint.yaml) and created
 with `infra/runpod/create-endpoint.sh` (needs `RUNPOD_API_KEY=rpa_xxx` in `.env` and `yq` v4).
 
-> **Status: wiring into `task up` is pending.** `manifests/10-presidio-analyzer.yaml` is already the
-> RunPod proxy, but `Taskfile.yml` doesn't yet create its `runpod-analyzer` Secret
-> (`RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`), and `verify-images` still checks the old analyzer image.
-> Until that lands, `task up` fails at `verify-images`.
+`task up` needs `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` in `.env`. It stores them in the
+`runpod-analyzer` Secret, which only the proxy reads. Verified end to end from the host: a Claude
+request to `http://litellm.local:8080` (Traefik → LiteLLM → proxy → RunPod GPU) returned HTTP 200 in
+about 9 s. Anthropic received `Maintainer: <PERSON>, based in <LOCATION>. func
+dallasRetryPolicy(attempt int) bool { return s.City != nil }`: the name and city were masked, and
+the code was untouched. Claude may still echo placeholders onto code tokens in its *reply*; that's
+the model imitating the pattern, not a masking error.
+
+Between demos, set the endpoint's `workers.max` to `0` so nothing can bill, and back to `1`
+beforehand. Allow for the cold start.
+
+The proxy resolves RunPod's hostname at request time through cluster DNS, IPv4 only
+(`resolver … ipv6=off`). RunPod publishes IPv6 addresses too, but the cluster has no IPv6 egress,
+so resolving once at startup made nginx waste connection attempts on unreachable addresses.
 
 ### TLS & cert-manager
 
@@ -338,6 +348,7 @@ pii-guardian/
 - Host connectivity via k3d's nginx sidecar container, which maps `localhost:8080→node:80` and `localhost:8443→node:443` at the Docker layer (declared in `k3d/cluster.yaml`)
 - Traefik configured via `HelmChartConfig` to bind `hostPort: 80/443` on the server node so the nginx sidecar can reach it
 - **Cilium CNI** replaces the default flannel — required for `CiliumNetworkPolicy` enforcement on LiteLLM egress
+- Cilium runs with `kubeProxyReplacement=false` but `nodePort.enabled=true` and `hostPort.enabled=true`. Flannel's `portmap` plugin used to implement Traefik's `hostPort: 80/443`; without these two settings, Cilium doesn't implement host ports at all, and `litellm.local:8080`/`:8443` get no answer from the host. `rollOutCiliumPods=true` makes Helm restart the agents when this config changes (otherwise the new ConfigMap is ignored until the next restart).
 
 **k3d limitation — FQDN egress policy:** In production Kubernetes (EKS, GKE, etc.), `manifests/40-litellm-netpol.yaml` uses `toFQDNs: [{matchName: "api.anthropic.com"}]` to restrict external egress to Anthropic's IPs only. In k3d, Cilium's DNS proxy redirect (eBPF/iptables hooks for pod-level DNS interception) does not function inside Docker-in-Docker nodes — the FQDN cache stays empty regardless of mode. The manifest uses `toEntities: world` port 443 as the k3d-compatible equivalent, restricting external egress to HTTPS only. The production form is preserved as a comment in the manifest. See upstream: [cilium/cilium#19045 — toFQDNs not working](https://github.com/cilium/cilium/issues/19045).
 
@@ -348,6 +359,7 @@ In the cluster, `presidio-analyzer` is an auth-adding proxy:
 - Replicas: 1
 - Resources: requests 50m CPU / 32Mi memory; limits 500m CPU / 128Mi memory
 - ClusterIP service, port 3000; forwards only `POST /analyze`, with a 300 s read timeout for cold starts
+- Resolves the RunPod hostname at request time via kube-dns, IPv4 only (the cluster has no IPv6 egress)
 - Liveness/readiness on `/health`, answered by nginx itself (never forwarded)
 - Env from Secret `runpod-analyzer`: `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`
 
