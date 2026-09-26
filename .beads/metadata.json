@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pii_guardian",
+  "project_id": "23e5caeb-1ea8-4b0b-b49d-e15292ffa8e0"
+}
