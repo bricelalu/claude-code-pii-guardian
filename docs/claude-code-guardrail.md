@@ -84,7 +84,7 @@ All in [`guardrail/`](../guardrail/). The live checks need `task up` and a RunPo
 
 | Check | What it proves | Result |
 |---|---|---|
-| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 25/25 (23 + 2 skipped without `pygments`) |
+| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 27/27 (25 + 2 skipped without `pygments`) |
 | `scope_check.py` (live) | Which blocks of a real `/v1/messages` request are scanned: a test card number in one block at a time must block the request only when that block is scanned | 8/8 |
 | `regex_sweep.py` (offline) | Regex false positives on real code | 14,594 files (240 MB, the LiteLLM image's site-packages): 5,152 matches before fencing, 2,227 after, mostly real emails/IPs in package metadata and docs |
 | `replay_sessions.py` (local only) | Regexes on your own `~/.claude/projects` transcripts | 26 sessions, 914 distinct scanned blocks (1.2 MB), 63 would change; found the infrastructure-IP issue. Report in `.pii-score-out/` (gitignored) |

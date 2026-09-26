@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import unittest
+from unittest.mock import patch
 
 from code_guard import DATA_EXTENSIONS, REGEXES, Blocked, Masker, is_code_file
 
@@ -243,6 +244,44 @@ class MaskRequestTest(unittest.TestCase):
         before = len(self.calls)
         asyncio.run(self.masker.mask_request(copy.deepcopy(self.original)))
         self.assertEqual(len(self.calls), before)
+
+
+class CacheTest(unittest.TestCase):
+    """The NER cache is an optimisation: a lost entry must cost a re-analysis, never a detection."""
+
+    def test_reset_of_a_full_cache_still_masks_texts_cached_earlier(self):
+        masker, _ = make_masker()
+        with patch("code_guard.CACHE_MAX", 2):
+            self.assertEqual(asyncio.run(masker.mask_texts(["Hi Jean Dupont"])), ["Hi <PERSON>"])
+            # Two new texts fill the cache and reset it; the first text is masked again anyway.
+            out = asyncio.run(masker.mask_texts(["from Paris", "Lucía Fernández", "Hi Jean Dupont"]))
+        self.assertEqual(out, ["from <LOCATION>", "<PERSON>", "Hi <PERSON>"])
+
+    def test_concurrent_calls_do_not_unmask_each_other(self):
+        masker, _ = make_masker()
+        analyze = masker.analyze
+        asyncio.run(masker.mask_texts(["Hi Jean Dupont"]))  # cached, and about to be evicted
+
+        async def race():
+            victim_may_return = asyncio.Event()
+
+            async def analyze_waiting(text):
+                if text == "in Paris":  # the victim: the other request resets the cache while it waits
+                    await victim_may_return.wait()
+                return await analyze(text)
+
+            async def resetter():
+                try:
+                    return await masker.mask_texts(["from Lyon", "to Victoria"])
+                finally:
+                    victim_may_return.set()
+
+            masker.analyze = analyze_waiting
+            return await asyncio.gather(masker.mask_texts(["Hi Jean Dupont", "in Paris"]), resetter())
+
+        with patch("code_guard.CACHE_MAX", 2):
+            out, _ = asyncio.run(race())
+        self.assertEqual(out, ["Hi <PERSON>", "in <LOCATION>"])
 
 
 if __name__ == "__main__":

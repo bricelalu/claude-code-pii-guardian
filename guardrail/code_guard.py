@@ -217,14 +217,19 @@ class Masker:
 
     async def mask_texts(self, texts):
         texts = list(await asyncio.gather(*(self._decode_json(t) for t in texts)))
-        new = [t for t in dict.fromkeys(texts) if t.strip() and t not in self.cache]
+        unique = [t for t in dict.fromkeys(texts) if t.strip()]
+        # The cache is read before awaiting the analyzer, on purpose: it is shared with concurrent
+        # requests, and losing an entry may only cost a re-analysis, never a detection.
+        cached = {t: self.cache[t] for t in unique if t in self.cache}
+        new = [t for t in unique if t not in cached]
         results = await asyncio.gather(*(self.analyze(t) for t in new))
+        ner = {**cached, **dict(zip(new, results))}
         if len(self.cache) + len(new) > CACHE_MAX:  # ponytail: wholesale reset, LRU if hit rate drops
             self.cache.clear()
         self.cache.update(zip(new, results))
         out = []
         for text in texts:
-            for start, end, label in reversed(self._spans(text, self.cache.get(text, []))):
+            for start, end, label in reversed(self._spans(text, ner.get(text, []))):
                 text = text[:start] + label + text[end:]
             out.append(text)
         return out
