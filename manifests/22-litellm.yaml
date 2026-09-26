@@ -69,6 +69,9 @@ spec:
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
+            - name: guardrail
+              mountPath: /app/code_guard.py
+              subPath: code_guard.py
           resources:
             requests:
               cpu: 500m
@@ -94,6 +97,10 @@ spec:
         - name: config
           configMap:
             name: litellm-config
+        # Created from guardrail/code_guard.py by `task up` / `task reload-config`.
+        - name: guardrail
+          configMap:
+            name: litellm-guardrail
 ---
 apiVersion: v1
 kind: Service

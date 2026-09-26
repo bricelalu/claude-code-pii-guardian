@@ -27,7 +27,8 @@ task demo
 ```
 
 The demo brings up a local K3D cluster, routes Claude Code through a LiteLLM + Presidio gateway,
-and walks through three scenarios proving **MASK**, **AUDIT**, and **BLOCK** behaviors.
+and walks through three scenarios proving **MASK**, **AUDIT**, and **BLOCK** behaviors. (AUDIT is
+currently disabled: see [9.2](#92-scenario-audit--demoscenario-auditsh).)
 
 ---
 
@@ -79,6 +80,7 @@ authentication options (including the subscription-only path).
 | `task verify-netpol` | Verify CiliumNetworkPolicy — allowed traffic passes, blocked traffic is dropped |
 | `task pii-score` | Score masking ratio / false-positive ratio across CSV, Markdown, and minified-JSON exports |
 | `task pii-bench` | Benchmark NER backends (spaCy, GLiNER, GLiNER2) on PERSON/LOCATION in generated source files |
+| `task pii-bench-gateway` | End-to-end benchmark through the running gateway (LiteLLM → proxy → RunPod GLiNER2); per-file report of what is and isn't masked in `.pii-score-out/gateway-bench/` |
 
 ---
 
@@ -123,6 +125,11 @@ Stay tight on scope. Do **not**:
 - **Multilingual detection.** The model detects French, English, Spanish and Italian names and
   places while Presidio is still called with `language: en`.
 - **External analyzer.** Analysis runs on a RunPod GPU in the EU instead of inside the cluster.
+- **Custom guardrail.** One small Python guardrail, [`guardrail/code_guard.py`](guardrail/code_guard.py),
+  replaces the built-in presidio and regex guardrails. The built-ins can't tell a Read result from
+  an Edit result, can't spare code files or paths, and scan Claude's system prompt and own
+  replies. See [PII scope for Claude Code](#pii-scope-for-claude-code) and the
+  [guardrail report](docs/claude-code-guardrail.md).
 
 ## 4. Architecture
 
@@ -145,9 +152,7 @@ graph TD
     
     LLM["⚡ LiteLLM Proxy<br/>Port 4000 | /v1/messages"]
     
-    PRE["🛡️ Pre-Call Guardrail<br/>MASK: email, phone, PERSON ≥ 0.85, LOCATION ≥ 0.96<br/>BLOCK: credit_card, iban"]
-    
-    AUDIT["📊 Audit Guardrail<br/>LOG: faint PII signals<br/>Mode: logging_only"]
+    PRE["🛡️ code-guard (guardrail/code_guard.py)<br/>scans: user text + tool results (not Write/Edit)<br/>MASK: PERSON ≥ 0.85, LOCATION ≥ 0.96 (GLiNER2)<br/>MASK: email, phone, IBAN, IPv4/IPv6 (regex)<br/>BLOCK: credit_card"]
     
     ANALYZER["🔍 presidio-analyzer (in cluster)<br/>nginx proxy, port 3000<br/>adds RunPod bearer key"]
     
@@ -171,9 +176,7 @@ graph TD
     TRAEFIK -->|Route| LLM
     
     LLM --> PRE
-    LLM --> AUDIT
     PRE --> ANALYZER
-    AUDIT --> ANALYZER
     ANALYZER -->|HTTPS /analyze| RUNPOD
     ANALYZER --> ANON
     
@@ -192,7 +195,6 @@ graph TD
     style TRAEFIK fill:#ffccbc
     style LLM fill:#fce4ec
     style PRE fill:#ffebee
-    style AUDIT fill:#f1f8e9
     style ANALYZER fill:#e0f2f1
     style RUNPOD fill:#ede7f6
     style ANON fill:#e0f2f1
@@ -223,20 +225,24 @@ Names and places (PERSON, LOCATION) are detected by **GLiNER2**
 (`fastino/gliner2-privacy-filter-PII-multi`) instead of Presidio's default spaCy model. In the
 [benchmark](docs/ner-model-benchmark.md), GLiNER2 was the only model that masked names and places
 in source code without masking code tokens. spaCy masked identifiers such as `s.Carrier`, `nil` and
-`s.City`, which broke 19 of 27 files. Emails, phones, cards and IBANs still come from Presidio's
-pattern recognizers.
+`s.City`, which broke 19 of 27 files.
+
+Deterministic values (emails, phone numbers, IBANs, IPv4/IPv6 addresses) don't need a model. They
+are matched by regexes in the same guardrail, inside the LiteLLM pod, in one pass with GLiNER2 over
+the original text. IBANs are masked (and checksum-verified), not blocked. Credit cards **BLOCK** the
+request, because Presidio validates the card number's Luhn checksum.
 
 GLiNER2 needs a GPU to be usable on the request path (about 12 s per 10 KB on a laptop CPU), so the
 analyzer runs as a **RunPod serverless endpoint** and the cluster keeps a thin proxy:
 
 ```
-LiteLLM guardrail ──► presidio-analyzer Service (k3d, same name/port as before)
-                        └─ nginx proxy: adds "Authorization: Bearer <RunPod key>"; /health answered locally
-                             └─► https://<endpoint-id>.api.runpod.ai/analyze
-                                   └─ Presidio + GLiNER2 on 1 GPU (EU-RO-1 / EU-CZ-1), 0 workers when idle
+code-guard (LiteLLM) ──► presidio-analyzer Service (k3d, same name/port as before)
+                           └─ nginx proxy: adds "Authorization: Bearer <RunPod key>"; /health answered locally
+                                └─► https://<endpoint-id>.api.runpod.ai/analyze   (kept-alive TLS connections)
+                                      └─ Presidio + GLiNER2 on 1 GPU (EU-RO-1 / EU-CZ-1), 0 workers when idle
 ```
 
-- **Why a proxy.** LiteLLM's Presidio guardrail can't send an `Authorization` header, and the
+- **Why a proxy.** The guardrail never holds the RunPod key: the proxy adds it, and the
   RunPod endpoint rejects unauthenticated calls (401). The proxy keeps the `presidio-analyzer`
   Service name, label and port, so LiteLLM's config and the CiliumNetworkPolicy don't change. Its
   health probe is answered locally, so Kubernetes probes never wake (and bill) a GPU worker.
@@ -245,11 +251,11 @@ LiteLLM guardrail ──► presidio-analyzer Service (k3d, same name/port as be
   *unmasked* prompt, so this is a sub-processor for personal data.
 - **Image.** `ghcr.io/bricelalu/pii-guardian-analyzer-gliner2`, **private** on GHCR, pinned by
   digest. RunPod pulls it with its own GitHub token that has only `read:packages`.
-- **Fail closed.** If the analyzer errors or times out, LiteLLM **blocks** the request rather than
-  forwarding it unmasked.
-- **Cold start.** After an idle period, a fresh worker takes several minutes to become ready
-  (claiming a GPU, then unpacking the 9.6 GB image). The first requests during that window are
-  blocked. Wake the endpoint before a demo.
+- **Fail closed.** If the analyzer errors or times out, the guardrail **blocks** the request rather
+  than forwarding it unmasked.
+- **Cold start.** After an idle period, a fresh worker takes 80–100 s to become ready (6.5 minutes
+  the very first time: claiming a GPU, then unpacking the 9.6 GB image). Requests during that window are held by the
+  guardrail's retries (up to about 3 minutes), then blocked. Wake the endpoint before a demo.
 - **Cost.** 16 GB GPU tier at $0.58/h, 24 GB tier at $0.69/h as fallback, billed per second while a
   worker runs, $0 when idle.
 
@@ -257,19 +263,60 @@ The endpoint is defined in [`infra/runpod/endpoint.yaml`](infra/runpod/endpoint.
 with `infra/runpod/create-endpoint.sh` (needs `RUNPOD_API_KEY=rpa_xxx` in `.env` and `yq` v4).
 
 `task up` needs `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` in `.env`. It stores them in the
-`runpod-analyzer` Secret, which only the proxy reads. Verified end to end from the host: a Claude
-request to `http://litellm.local:8080` (Traefik → LiteLLM → proxy → RunPod GPU) returned HTTP 200 in
-about 9 s. Anthropic received `Maintainer: <PERSON>, based in <LOCATION>. func
-dallasRetryPolicy(attempt int) bool { return s.City != nil }`: the name and city were masked, and
-the code was untouched. Claude may still echo placeholders onto code tokens in its *reply*; that's
-the model imitating the pattern, not a masking error.
+`runpod-analyzer` Secret, which only the proxy reads. Between demos, set the endpoint's
+`workers.max` to `0` so nothing can bill, and back to `1` beforehand. Allow for the cold start.
 
-Between demos, set the endpoint's `workers.max` to `0` so nothing can bill, and back to `1`
-beforehand. Allow for the cold start.
+The proxy reaches RunPod through an nginx `upstream` with `keepalive` (one TLS handshake reused
+across calls) and `resolve` (the name is re-resolved while running, through cluster DNS, IPv4 only:
+RunPod publishes IPv6 addresses too, but the cluster has no IPv6 egress).
 
-The proxy resolves RunPod's hostname at request time through cluster DNS, IPv4 only
-(`resolver … ipv6=off`). RunPod publishes IPv6 addresses too, but the cluster has no IPv6 egress,
-so resolving once at startup made nginx waste connection attempts on unreachable addresses.
+### PII scope for Claude Code
+
+The gateway sits between Claude Code on developer laptops and the Anthropic API, so masking must
+never break a tool call. `code-guard` ([`guardrail/code_guard.py`](guardrail/code_guard.py)) masks
+only what can carry a third party's PII. Full report, with every measurement:
+[docs/claude-code-guardrail.md](docs/claude-code-guardrail.md).
+
+| Part of the `/v1/messages` request | Masked? | Why |
+|---|---|---|
+| What the developer types (user text blocks) | ✅ | Prompts, pasted data |
+| MCP tool results (JSON, Markdown tables, CSV) | ✅ | Customer data from other systems. Escaped documents inside JSON strings (a table in a `content` field, JSON in JSON) are decoded and masked as documents of their own |
+| Bash, Grep and other tool results | ✅ | Command output, search hits |
+| Read of a data file (`.csv`, `.json`, `.md`, `.txt`, `.sql`, …, or unknown type) | ✅ | Exports and dumps; the list is `data_extensions` in the config |
+| Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `Dockerfile`, …) | ❌ | Claude quotes it exactly in its Edits; the language is recognized with `pygments`, which ships with LiteLLM's proxy image |
+| Write / Edit / MultiEdit / NotebookEdit results | ❌ | They echo the file being edited; a mask there breaks the next Edit |
+| `tool_use` input (paths, commands, `old_string`) | ❌ | Claude's own tool calls must reach the tools unchanged |
+| System prompt, Claude's own replies | ❌ | Written by Claude Code / Claude, rescanning them only adds latency |
+| Paths and URLs (`/Users/<name>/…`, `https://…`, `Europe/Paris`) | ❌ | A masked path breaks every tool call that reuses it |
+
+Also never masked: role words that GLiNER2 mistakes for people ("customer 2", "user 42", "the
+customer"), and infrastructure IPs (private, loopback, link-local, public DNS resolvers) that show
+up in `kubectl` and log output.
+
+**Can Claude Code still work?** `guardrail/claude_ab.py` runs the same `claude -p` tasks directly
+and through the gateway on a small CRM repo full of customer PII (Haiku 4.5, 2 runs each):
+
+| Task | Direct | Gateway, every Read masked | Gateway, current rules |
+|---|---|---|---|
+| Fix a bug on a line without PII | 2/2 | 2/2 | 2/2 |
+| Change one customer's plan in `customers.py` | 2/2 | 1/2, 4 failed Edits | **2/2** |
+| Add a function and its test | 2/2 | **0/2, placeholders written into the test file** | **2/2** |
+| Fix one cell in `customers.csv` | 2/2 | 1/2, 13 failed Edits | 0/2 (by design) |
+
+A masked file can't be edited on its masked lines: Claude quotes `<PERSON>` in its `old_string`,
+which isn't on disk. So code files reach Claude as they are, data files stay masked, and **editing
+a data file's PII cells through the gateway doesn't work**. PII inside code files (author lines,
+test fixtures) does reach Anthropic.
+
+**Latency.** A 12 KB export takes 1.7 s through the gateway the first time and 0.47 s once cached:
+NER results are cached per block, because Claude Code resends the whole conversation every turn.
+On the A/B tasks, Claude Code was about 1.5–2× slower through the gateway. Splitting documents into
+chunks didn't pay off; the details are in the report.
+
+**Checks** (in [`guardrail/`](guardrail/)): `test_code_guard.py` (offline unit tests),
+`scope_check.py` (which blocks of a real request get scanned), `regex_sweep.py` (regex false
+positives on real code), `replay_sessions.py` (your own sessions, locally), `claude_ab.py` (the
+A/B above).
 
 ### TLS & cert-manager
 
@@ -288,7 +335,15 @@ export ANTHROPIC_BASE_URL=https://litellm.local:8443
 export ANTHROPIC_AUTH_TOKEN=sk-xxx
 ```
 
-The host port mapping (`8080:80`, `8443:443`) is declared in `k3d/cluster.yaml`. A `HelmChartConfig` (`manifests/15-traefik-config.yaml`) configures Traefik to bind `hostPort: 80/443` on the server node, so traffic reaches Traefik without any port-forward. Add `127.0.0.1 litellm.local` to `/etc/hosts` (already present if you've run `task up`).
+The host port mapping (`8080:80`, `8443:443`) is declared in `k3d/cluster.yaml`. A `HelmChartConfig` (`manifests/15-traefik-config.yaml`) configures Traefik to bind `hostPort: 80/443` on the server node, so traffic reaches Traefik without any port-forward. Add both lines to `/etc/hosts` (`task up` doesn't write them):
+
+```
+127.0.0.1       litellm.local
+::1             litellm.local
+```
+
+The `::1` line matters on macOS: without it, the IPv6 lookup of a `.local` name goes to mDNS and
+times out after 5 s, and Claude Code doesn't cache DNS, so **every request** waits 5 s.
 
 In production, replace the `ClusterIssuer: selfsigned` with Let's Encrypt or your organization's CA.
 
@@ -302,13 +357,20 @@ pii-guardian/
 ├── .env.example                        # template for ANTHROPIC_API_KEY + LITELLM_MASTER_KEY
 ├── k3d/
 │   └── cluster.yaml                    # k3d cluster definition (host port mapping)
+├── guardrail/
+│   ├── code_guard.py                   # the LiteLLM guardrail (mounted as /app/code_guard.py)
+│   ├── test_code_guard.py              # offline unit tests
+│   ├── scope_check.py                  # which /v1/messages blocks get scanned (live gateway)
+│   ├── regex_sweep.py                  # regex false positives over real source files
+│   ├── replay_sessions.py              # your own Claude Code sessions through the regexes
+│   └── claude_ab.py                    # claude -p tasks, direct vs through the gateway
 ├── manifests/
 │   ├── 00-namespace.yaml
 │   ├── 10-presidio-analyzer.yaml       # nginx proxy to the GLiNER2 analyzer on RunPod
 │   ├── 11-presidio-anonymizer.yaml
 │   ├── 15-traefik-config.yaml          # HelmChartConfig — hostPort 80/443 for k3d
-│   ├── 21-litellm-config.yaml          # ConfigMap with guardrail YAML
-│   ├── 22-litellm.yaml                 # Deployment + Service
+│   ├── 21-litellm-config.yaml          # ConfigMap: models + code-guard settings
+│   ├── 22-litellm.yaml                 # Deployment (mounts config.yaml and code_guard.py) + Service
 │   ├── 25-certificate-issuer.yaml      # cert-manager ClusterIssuer + Certificate
 │   ├── 26-litellm-ingress.yaml         # Traefik Ingress (HTTPS + HTTP)
 │   ├── 30-postgres.yaml
@@ -320,12 +382,16 @@ pii-guardian/
 │   └── show-evidence.sh
 ├── scripts/
 │   └── pii-score/
-│       ├── seed.sql                    # fake PII dataset (SQLite)
-│       ├── export.sh                   # builds the dataset, exports CSV/Markdown/JSON
-│       ├── run.sh                      # task pii-score: scores each export
-│       ├── score.py                    # calls Presidio directly, computes ratios
+│       ├── data/                       # curated open-data samples + SOURCES.md (licences)
+│       ├── fetch_opendata.py           # refreshes data/ from INSEE, data.gouv.fr, BAN
+│       ├── customers.py                # builds the 50-row customers table + per-cell answer key
+│       ├── export.sh                   # exports it as CSV / Markdown / minified JSON (sqlite3)
+│       ├── run.sh                      # task pii-score: exports through the gateway
 │       ├── bench.sh                    # task pii-bench: runs every analyzer variant
-│       └── span_score.py               # span-level P/R/F1 + false-positive token report
+│       ├── span_score.py               # span-level P/R/F1 + false-positive token report
+│       ├── bench-gateway.sh            # task pii-bench-gateway: code + exports through the gateway
+│       ├── gateway_bench.py            # sends files through the guardrails, per-file report
+│       └── common.py                   # shared helpers
 ├── bench/
 │   ├── analyzers/                      # one Dockerfile per NER variant
 │   │   └── gliner2/                    # also the RunPod GPU image (requirements-cuda-amd64.txt, runpod_app.py)
@@ -336,6 +402,7 @@ pii-guardian/
 │       └── create-endpoint.sh          # creates it from endpoint.yaml
 └── docs/
     ├── ner-model-benchmark.md          # NER model comparison and executive summary
+    ├── claude-code-guardrail.md        # code-guard: scope, rules, A/B with Claude Code, latency
     └── notes.md
 ```
 
@@ -359,7 +426,8 @@ In the cluster, `presidio-analyzer` is an auth-adding proxy:
 - Replicas: 1
 - Resources: requests 50m CPU / 32Mi memory; limits 500m CPU / 128Mi memory
 - ClusterIP service, port 3000; forwards only `POST /analyze`, with a 300 s read timeout for cold starts
-- Resolves the RunPod hostname at request time via kube-dns, IPv4 only (the cluster has no IPv6 egress)
+- Reaches RunPod through an `upstream` with `keepalive` (reused TLS connections) and `resolve`
+  (re-resolved via kube-dns while running, IPv4 only: the cluster has no IPv6 egress)
 - Liveness/readiness on `/health`, answered by nginx itself (never forwarded)
 - Env from Secret `runpod-analyzer`: `RUNPOD_API_KEY`, `RUNPOD_ENDPOINT_ID`
 
@@ -373,6 +441,7 @@ RunPod image (`bench/analyzers/gliner2/Dockerfile`, built with
   gunicorn's master before it forks, and the worker fails with "Cannot re-initialize CUDA in forked
   subprocess"
 ### 6.3 Presidio Anonymizer
+Still deployed, but not called: `code-guard` replaces the detected spans itself.
 - Image: mcr.microsoft.com/presidio-anonymizer (pin to a specific tag and digest at scaffolding time)
 - Replicas: 1
 - Resources: requests 100m CPU / 128Mi memory; limits 200m CPU / 256Mi memory
@@ -382,6 +451,9 @@ RunPod image (`bench/analyzers/gliner2/Dockerfile`, built with
 **Image source is non-negotiable:** use ghcr.io/berriai/litellm at an immutable release tag (currently v1.102.1) only, pinned to a specific image digest at scaffolding time. **Never** install via PyPI. See section 13 for the supply-chain rationale.
 - Replicas: 1
 - Config mounted from ConfigMap to /app/config.yaml
+- Guardrail module mounted from ConfigMap `litellm-guardrail` (created from `guardrail/code_guard.py`
+  by `task up` and `task reload-config`) to /app/code_guard.py, next to the config, where LiteLLM
+  loads `guardrail: code_guard.CodeGuard` from
 - Service: ClusterIP, port 4000
 - Required env (from Secret litellm-secrets):
   - ANTHROPIC_API_KEY — Anthropic API key used by LiteLLM to call Anthropic
@@ -403,40 +475,26 @@ model_list:
 general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
 guardrails:
-  # Primary protective layer — masks visible PII, blocks financial data
-  - guardrail_name: "presidio-mask"
+  # One guardrail, guardrail/code_guard.py, mounted next to config.yaml (ConfigMap
+  # litellm-guardrail, created by task up / task reload-config). Scope: user text and tool
+  # results, never Write/Edit results, tool_use input, system prompt, paths or URLs.
+  - guardrail_name: "code-guard"
     litellm_params:
-      guardrail: presidio
+      guardrail: code_guard.CodeGuard
       mode: "pre_call"
       default_on: true
-      presidio_language: "en"
-      # PERSON/LOCATION cutoffs from docs/ner-model-benchmark.md (GLiNER2)
-      presidio_score_thresholds:
-        ALL: 0.6
+      # Names and places (NER): Presidio + GLiNER2 on RunPod. Cutoffs from
+      # docs/ner-model-benchmark.md. Credit cards (Luhn-checked) block the request.
+      ner_thresholds:
         PERSON: 0.85
         LOCATION: 0.96
-      pii_entities_config:
-        EMAIL_ADDRESS: "MASK"
-        PERSON: "MASK"
-        LOCATION: "MASK"
-        PHONE_NUMBER: "MASK"
-        CREDIT_CARD: "BLOCK"
-        IBAN_CODE: "BLOCK"
-  # Secondary observability layer — catches faint signals, never blocks
-  - guardrail_name: "presidio-audit"
-    litellm_params:
-      guardrail: presidio
-      mode: "logging_only"
-      default_on: true
-      presidio_language: "en"
-      presidio_score_thresholds:
-        ALL: 0.35
-      pii_entities_config:
-        EMAIL_ADDRESS: "MASK"
-        PERSON: "MASK"
-        PHONE_NUMBER: "MASK"
-        LOCATION: "MASK"
-        DATE_TIME: "MASK"
+        CREDIT_CARD: 0.6
+      block_entities: ["CREDIT_CARD"]
+      skip_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+      # Read results of code files (pygments knows the language) are not masked, except these:
+      data_extensions: [".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".md", ".markdown", ".txt", ".log", ".xml", ".sql"]
+      # Email, IPv4/IPv6, phones, IBAN: REGEXES in guardrail/code_guard.py (unit-tested).
+      # presidio-audit (logging_only) is commented out in manifests/21-litellm-config.yaml.
 litellm_settings:
   set_verbose: true
   json_logs: true
@@ -473,7 +531,7 @@ Taskfile.yml must define these tasks, each with a desc: field:
 | task verify-images | Re-pull every image and verify the digest matches what is declared in manifests; fail if mismatch |
 | task status | Pod status + last 20 log lines + curl health check on LiteLLM |
 | task logs | kubectl logs -n gateway -l app=litellm -f |
-| task reload-config | Re-apply LiteLLM ConfigMap and rolling-restart the deployment |
+| task reload-config | Re-apply the LiteLLM ConfigMap and the `litellm-guardrail` ConfigMap (from `guardrail/code_guard.py`), then rolling-restart the deployment |
 | task demo | The headline task — see section 8 |
 task up must depend on task verify-images. Errors must surface clearly; avoid silent: true unless suppressing genuine noise.
 
@@ -508,25 +566,24 @@ Each scenario script must:
 **Prompt:**
 > "Please rewrite this email more politely: 'Hey John Smith, your delivery to john.smith@example.com is delayed. Call us at +33 6 12 34 56 78.'"
 **Expected evidence:**
-- LiteLLM logs show [PERSON], [EMAIL_ADDRESS], [PHONE_NUMBER] in the body forwarded to Anthropic
-- presidio-mask guardrail event fired
+- LiteLLM logs show `<PERSON>`, `[EMAIL_REDACTED]`, `[PHONE_INTERNATIONAL_REDACTED]` in the body forwarded to Anthropic
+- code-guard masked the name (GLiNER2), the email and the phone (regexes)
 - Claude responds with a rewritten email referencing placeholders (acceptable for the demo)
 **Verdict line:** "PII redacted before reaching Anthropic."
 ### 9.2 Scenario AUDIT — demo/scenario-audit.sh
 **Prompt:**
 > "Our team meeting is scheduled for next Tuesday at our Paris office. Sarah will present the Q3 forecast."
 **Expected evidence:**
-- presidio-mask (threshold 0.6) lets the prompt through unmodified — soft signals below blocking confidence
-- presidio-audit (threshold 0.35, logging_only) records detections for LOCATION=Paris, PERSON=Sarah, DATE_TIME=next Tuesday
-- The prompt sent to Anthropic is **unchanged**
-- Logs contain a detection event that a DPO could review
+- ⚠️ **Currently not applicable:** the `presidio-audit` logging_only guardrail is commented out
+  in `manifests/21-litellm-config.yaml`, and code-guard masks *Paris* and *Sarah* anyway. This
+  scenario still runs in `task demo` but shows no audit event until the audit layer is back.
 **Verdict line:** "Soft PII not blocked, but flagged for review. This is the safety net."
 ### 9.3 Scenario BLOCK — demo/scenario-block.sh
 **Prompt:**
 > "Help me parse this transaction log: card 4111-1111-1111-1111 charged 89.50 EUR on 2026-05-12."
 **Expected evidence:**
-- presidio-mask matches CREDIT_CARD with action BLOCK
-- LiteLLM returns an HTTP error (BlockedPiiEntityError) — Claude Code surfaces an error to the user
+- code-guard detects CREDIT_CARD (Luhn-checked) and blocks
+- LiteLLM returns HTTP 400 ("Blocked by code-guard: CREDIT_CARD detected") — Claude Code surfaces an error to the user
 - Logs confirm the request never left the gateway
 **Verdict line:** "Credit card detected — request blocked. Anthropic never saw it."
 
@@ -542,8 +599,8 @@ A reviewer running task demo on a clean machine must observe:
 1. K3D cluster + pods become ready (first run ~3–5 min for image pulls inside k3d's containerd; subsequent `task down` / `task up` is fast — images are cached)
 2. Three scenarios execute sequentially with clear visual demarcation
 3. **MASK** scenario shows side-by-side "user input" vs "sent to Anthropic" with PII visibly redacted
-4. **AUDIT** scenario shows a detection log entry without prompt modification
-5. **BLOCK** scenario produces a clear error from Claude Code and a BlockedPiiEntityError in LiteLLM logs
+4. **AUDIT** scenario shows a detection log entry without prompt modification (currently disabled, see 9.2)
+5. **BLOCK** scenario produces a clear error from Claude Code and an HTTP 400 "Blocked by code-guard" in LiteLLM logs
 6. task verify-images confirms image digests match before task up proceeds
 7. task clean removes the cluster in under **30 seconds**
 8. Re-running task demo after task clean works without manual intervention
@@ -556,6 +613,7 @@ A reviewer running task demo on a clean machine must observe:
 - task (Taskfile.dev) ≥ v3.30
 - jq
 - Claude Code CLI ≥ v2.1.129
+- `/etc/hosts` entries for `litellm.local` on both `127.0.0.1` and `::1` (see [TLS & cert-manager](#tls--cert-manager))
 - **An Anthropic API key with access to Claude models** — needed to populate the ANTHROPIC_API_KEY Secret consumed by LiteLLM. The POC uses an API key because the LLM gateway pattern documented by Anthropic terminates auth at LiteLLM. See section 14 for the production implication.
 - Network access to api.anthropic.com
 
@@ -574,31 +632,45 @@ Anthropic's official documentation explicitly warns that **LiteLLM PyPI versions
 This is non-negotiable. A PII protection layer compromised by malware is strictly worse than no PII protection layer.
 
 ## PII Detection Scoring (`task pii-score`)
-Measures Presidio's **masking ratio** (of true PII, how much gets masked/blocked) and
-**false-positive ratio** (of safe values, how much gets incorrectly flagged) across three
-identical renderings of a fake dataset — CSV, Markdown table, and minified JSON — to see whether
-the export format itself affects detection accuracy.
+Exports a fictional **customer table** the way a developer would paste it into Claude Code, and
+checks what the gateway masks in each format: CSV, Markdown table and minified JSON.
 
-This talks to Presidio Analyzer/Anonymizer **directly** (`kubectl port-forward`), not through
-`claude -p` / LiteLLM / the real Anthropic API like `task demo` does: `CREDIT_CARD`/`IBAN_CODE`
-are configured to **BLOCK** the whole request (§9.3), which would abort every other field in a
-batched prompt, and MASK vs AUDIT are otherwise indistinguishable from the client response. Since
-LiteLLM's guardrail is just Presidio's `/analyze` + `/anonymize` called with the thresholds in
-`21-litellm-config.yaml`, calling them directly with those same thresholds is a faithful,
-deterministic, cost-free reproduction of the guardrail's actual behavior.
+**The data** (`scripts/pii-score/customers.py`, 50 rows, fixed seed): one row per customer, the
+same 16 columns in every format.
 
-Extra prerequisite beyond §12: **sqlite3 ≥ 3.33** (for the `-markdown`/`-json` export modes;
-ships with macOS and most Linux distros). `python3` is already an implicit dependency via
-`task verify-netpol`.
+| Column | Example | Handled by |
+|---|---|---|
+| `id`, `customer_ref` (UUID), `created_at`, `status`, `plan` | `7`, `d777a477-…`, `active`, `pro` | safe: must stay untouched |
+| `firstname`, `lastname` | `jean-Michel` `MOREAU` | code-guard, GLiNER2 (PERSON) |
+| `address`, `city`, `country` | `3 Rue des Pins`, `Neubois`, `France` | code-guard, GLiNER2 (LOCATION) |
+| `customer_email`, `phone_number`, `iban`, `last_login_ip` | `e.peron@…`, `06.39.98.88.49`, `FR76 …`, `192.0.2.33` | code-guard, regexes |
+| `zipcode`, `birth_date` | `59540`, `1981-04-20` | not masked by design (not scored) |
 
-Run it: `task pii-score`. Output: a masking/false-positive/audit-detection ratio per format
-printed to the terminal, plus the actual masked text for each format written to
-`.pii-score-out/*.masked.txt` for manual inspection.
+- **Origins:** 70% French rows, with first names from INSEE, surnames from data.gouv.fr and real
+  street addresses, postcodes and cities from the Base Adresse Nationale. 10% each Spanish,
+  Italian and English rows. Sources and licences: `scripts/pii-score/data/SOURCES.md`.
+- **Casing:** exactly 30% of first names start lowercase; last names are split evenly between
+  UPPERCASE, lowercase and Capitalized.
+- **Phones:** French numbers use ARCEP's ranges reserved for fiction, in four formats. UK numbers
+  use Ofcom's drama range.
+- **IBANs and IPs:** IBANs have valid checksums, spaced or compact. IPs come from the
+  documentation ranges.
 
-The dataset's safe-value "decoys" (Terraform-ish resource ids, env var names, git SHAs, UUIDs,
-generic column names) are a deliberate baseline for a follow-on feature — teaching the gateway to
-recognize values that are safe specifically because of their code/coding-workflow context
-(Terraform, bash, other source files) and skip masking them. That feature is not implemented here.
+**How it runs:** `export.sh` renders `SELECT * FROM customers` with sqlite3 (`-header -csv`,
+`-markdown`, `-json | jq -c`). `customers.py truth` records the exact position of every cell.
+Each export then goes through the running gateway's guardrail (`/guardrails/apply_guardrail`:
+`code-guard` → RunPod GLiNER2 + regexes).
+
+Run it with `task pii-score`. It needs `task up` and a RunPod worker allowed (`workers.max ≥ 1`).
+Output in `.pii-score-out/`:
+- `report.md`: masked cells per column and format, plus every value that was or wasn't masked,
+  with its row and column;
+- `masked/`: exactly what LiteLLM would send to Anthropic.
+
+Refresh the French open-data samples with `python3 scripts/pii-score/fetch_opendata.py`.
+
+Extra prerequisite beyond §12: **sqlite3 ≥ 3.33**, for the `-markdown`/`-json` export modes. It
+ships with macOS and most Linux distributions.
 
 ### Model benchmark (`task pii-bench`)
 Findings and executive summary: [docs/ner-model-benchmark.md](docs/ner-model-benchmark.md).
@@ -608,7 +680,7 @@ pattern recognizers for email, card, IBAN and phone are kept in every variant):
 
 | Variant | NER backend | Notes |
 |---|---|---|
-| `spacy-en` | `en_core_web_lg` | What the gateway runs today; everything analyzed as `en` |
+| `spacy-en` | `en_core_web_lg` | What the gateway ran before GLiNER2; everything analyzed as `en` |
 | `spacy-multi` | `en_core_web_lg` + `fr/es/it_core_news_md` | Given each file's language up front: an **upper bound**, since the gateway always sends `en` |
 | `gliner` | `urchade/gliner_multi_pii-v1` | Presidio's built-in `GLiNERRecognizer` |
 | `gliner2` | `fastino/gliner2-privacy-filter-PII-multi` | Small custom recognizer (`bench/analyzers/gliner2/`) |
@@ -650,5 +722,38 @@ compared with a laptop CPU (i7-8565U):
 | 10 KB | 1.31 s | 11.57 s |
 | 40 KB | 5.17 s | 55.23 s |
 
-Under 1 s up to about 3–4 KB. Whole Claude Code conversations (10–40 KB, re-sent on every request)
-are still several seconds. Next levers are 16-bit model precision and scanning only new messages.
+Under 1 s up to about 3–4 KB. Through the gateway, a 12 KB export takes 1.7 s the first time and
+0.47 s once cached (see [the guardrail report](docs/claude-code-guardrail.md#latency)).
+
+**Gotcha: `.local` host names cost 5 s per request on macOS.** An IPv6 lookup of `litellm.local`
+goes to mDNS (Bonjour) and times out after 5 s before `/etc/hosts` answers; Claude Code (Node)
+doesn't cache DNS, so a developer would pay this on **every** request. This is why earlier
+end-to-end runs showed 11–14 s per file; with the `/etc/hosts` fix, the same benchmark
+runs at 0.5–0.9 s per code file and 1.7–2.3 s per 12–22 KB export (GPU warm, cache cold). Fix: add
+`::1 litellm.local` next to the `127.0.0.1` line in `/etc/hosts`, or use a `*.localhost` name
+(resolved locally, no mDNS).
+
+**End to end through the gateway** (`task pii-bench-gateway`): every file goes through
+`/guardrails/apply_guardrail` with `code-guard` (ingress → LiteLLM → proxy → RunPod), as flat
+text, i.e. the way a data-file Read, a Bash output or an MCP result is treated. Per-file results,
+including every value that was or wasn't masked, are in
+`.pii-score-out/gateway-bench/report.md`, and the exact masked text is under `masked/`.
+
+| Type | PERSON | LOCATION | Email/phone/IBAN/IP | Code or safe cells masked | Still valid |
+|---|---|---|---|---|---|
+| Go, Python, Rust, TypeScript | 48/48 | 36/36 | 16/16 | 0 | 16/16 |
+| Terraform | 12/12 | 7/8 (*Sheffield*) | 4/4 | 0 | 4/4 |
+| Java | 7/12 (Javadoc `@author` names) | 8/8 | 4/4 | 0 | 4/4 |
+| Customer export, CSV | 100/100 | 150/150 | 200/200 | 0 | yes |
+| Customer export, Markdown | 100/100 | 150/150 | 200/200 | 0 | yes |
+| Customer export, minified JSON | 100/100 | 150/150 | 200/200 | 0 | yes |
+
+- **Regexes are complete:** every email, phone (all formats), IBAN and IP in the exports is
+  masked, and no UUID, date, status or plan is touched.
+- **One pass, original text.** NER and regexes both see the original text, so a name next to an
+  email (`Maintainer: Rosalind Kerr <r.kerr@…>`) is masked again. With the earlier chained setup
+  (regex guardrail first), the placeholder lowered the name's score: Terraform dropped to 11/12
+  PERSON and 6/8 LOCATION, and exports to 95/100 (CSV) and 99/100 (Markdown).
+- **IBANs vs cards.** 3 of the 50 generated IBANs contain a Luhn-valid 16-digit run, which Presidio
+  reports as a credit card and would block the whole request. A NER hit inside a regex hit now
+  defers to it.

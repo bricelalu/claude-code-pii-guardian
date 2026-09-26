@@ -37,41 +37,48 @@ data:
       master_key: "os.environ/LITELLM_MASTER_KEY"
 
     guardrails:
-      - guardrail_name: "presidio-mask"
+      # One guardrail for Claude Code traffic: guardrail/code_guard.py (mounted next to this file).
+      # Masks user text and tool results only; never the system prompt, assistant text,
+      # tool_use input, Write/Edit results, paths or URLs. See the module docstring.
+      - guardrail_name: "code-guard"
         litellm_params:
-          guardrail: presidio
+          guardrail: code_guard.CodeGuard
           mode: "pre_call"
           default_on: true
-          presidio_language: "en"
-          # PERSON/LOCATION come from GLiNER2; cutoffs from docs/ner-model-benchmark.md
-          # (100% precision on code, held-out languages). Code tokens such as
-          # `fullName` score up to 0.81 and cloud regions (`us-east-1a`) up to 0.95.
-          presidio_score_thresholds:
-            ALL: 0.6
+          # Names and places (NER), via Presidio + GLiNER2 on RunPod. Cutoffs from
+          # docs/ner-model-benchmark.md (100% precision on code, held-out languages): code tokens
+          # such as `fullName` score up to 0.81 and cloud regions (`us-east-1a`) up to 0.95.
+          # Credit cards BLOCK the request: Presidio validates the Luhn checksum.
+          ner_thresholds:
             PERSON: 0.85
             LOCATION: 0.96
-          pii_entities_config:
-            EMAIL_ADDRESS: "MASK"
-            PERSON: "MASK"
-            LOCATION: "MASK"
-            PHONE_NUMBER: "MASK"
-            CREDIT_CARD: "BLOCK"
-            IBAN_CODE: "BLOCK"
+            CREDIT_CARD: 0.6
+          block_entities: ["CREDIT_CARD"]
+          # Their tool_result echoes the file being edited; masking it breaks the next Edit.
+          skip_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+          # Read results of code files are not masked (pygments recognizes the language, e.g.
+          # .py .ts .go .tf Dockerfile): Claude quotes them exactly in its Edits. These extensions stay
+          # masked anyway (exports, dumps); unknown files (.env, no extension) are masked too.
+          # MCP, Bash and Grep results are always masked.
+          data_extensions: [".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".md", ".markdown", ".txt", ".log", ".xml", ".sql"]
+          # Deterministic PII (email, IPv4/6, phones, IBAN): REGEXES in guardrail/code_guard.py,
+          # where they are unit-tested against real code false positives.
 
-      - guardrail_name: "presidio-audit"
-        litellm_params:
-          guardrail: presidio
-          mode: "logging_only"
-          default_on: true
-          presidio_language: "en"
-          presidio_score_thresholds:
-            ALL: 0.35
-          pii_entities_config:
-            EMAIL_ADDRESS: "MASK"
-            PERSON: "MASK"
-            PHONE_NUMBER: "MASK"
-            LOCATION: "MASK"
-            DATE_TIME: "MASK"
+      # Disabled for now: logging_only Presidio pass (DATE_TIME and low-score detections).
+      # - guardrail_name: "presidio-audit"
+      #   litellm_params:
+      #     guardrail: presidio
+      #     mode: "logging_only"
+      #     default_on: true
+      #     presidio_language: "en"
+      #     presidio_score_thresholds:
+      #       ALL: 0.35
+      #     pii_entities_config:
+      #       EMAIL_ADDRESS: "MASK"
+      #       PERSON: "MASK"
+      #       PHONE_NUMBER: "MASK"
+      #       LOCATION: "MASK"
+      #       DATE_TIME: "MASK"
 
     litellm_settings:
       forward_llm_provider_auth_headers: true

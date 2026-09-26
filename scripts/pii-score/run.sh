@@ -1,80 +1,33 @@
 #!/usr/bin/env bash
-# Scores Presidio's PII masking/false-positive accuracy across three renderings
-# of the same fake dataset: CSV, Markdown table, minified JSON.
-#
-# Talks directly to Presidio Analyzer/Anonymizer (kubectl port-forward), NOT
-# through `claude -p` / LiteLLM / the real Anthropic API like demo/*.sh does.
-# That's deliberate: CREDIT_CARD/IBAN_CODE are configured to BLOCK the whole
-# request (manifests/21-litellm-config.yaml), which would abort every other
-# field in a batched prompt; MASK vs AUDIT are indistinguishable from a
-# client-side response; and real API calls are slow, costly, and add LLM
-# response noise to what should be a deterministic detection measurement.
-# LiteLLM's guardrail is just Presidio's analyze+anonymize called with these
-# same thresholds, so testing Presidio directly is a faithful, isolated
-# reproduction of the guardrail's actual behavior.
+# task pii-score: build the 50-row customers table (French open data), export it as CSV,
+# Markdown table and minified JSON, and send each export through the running gateway's
+# code-guard guardrail (RunPod GLiNER2 + regexes). Reports, per format and per
+# column, what was masked and what wasn't. Needs `task up` and a RunPod worker allowed
+# (endpoint workers.max >= 1).
+# Output: .pii-score-out/{export.*, truth.json, masked/, report.md, results.json}
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT_DIR="$REPO_ROOT/.pii-score-out"
-NAMESPACE="gateway"
-ANALYZER_PORT=18081
-ANONYMIZER_PORT=18082
+GATEWAY="${GATEWAY_URL:-http://litellm.local:8080}"
 
-for bin in sqlite3 jq python3 kubectl curl; do
+for bin in sqlite3 jq python3 curl; do
   command -v "$bin" >/dev/null || { echo "ERROR: $bin is required." >&2; exit 1; }
 done
+if [ -z "${LITELLM_MASTER_KEY:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
+  LITELLM_MASTER_KEY="$(grep -E '^LITELLM_MASTER_KEY=' "$REPO_ROOT/.env" | cut -d= -f2- || true)"
+fi
+export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is not set (env or .env)}"
+curl -sf -m 10 "$GATEWAY/health/liveliness" >/dev/null \
+  || { echo "ERROR: gateway not reachable at $GATEWAY — run 'task up'." >&2; exit 1; }
 
-rm -rf "$OUT_DIR"
-mkdir -p "$OUT_DIR"
-
+rm -rf "$OUT_DIR/masked" "$OUT_DIR"/export.* "$OUT_DIR"/truth.json "$OUT_DIR"/report.md "$OUT_DIR"/results.json
 bash "$SCRIPT_DIR/export.sh" "$OUT_DIR"
 
-echo "▶ Port-forwarding Presidio Analyzer/Anonymizer..."
-PF_PIDS=()
-cleanup() {
-  for pid in "${PF_PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
-}
-trap cleanup EXIT
-
-kubectl port-forward -n "$NAMESPACE" svc/presidio-analyzer "${ANALYZER_PORT}:3000" >/dev/null 2>&1 &
-PF_PIDS+=("$!")
-kubectl port-forward -n "$NAMESPACE" svc/presidio-anonymizer "${ANONYMIZER_PORT}:3000" >/dev/null 2>&1 &
-PF_PIDS+=("$!")
-
-wait_ready() {
-  local url="$1" name="$2"
-  for _ in $(seq 1 20); do
-    curl -sf "$url" >/dev/null 2>&1 && { echo "  ✓ $name ready"; return 0; }
-    sleep 0.5
-  done
-  echo "ERROR: $name did not become ready — is 'task up' running?" >&2
-  exit 1
-}
-wait_ready "http://localhost:${ANALYZER_PORT}/health"   "presidio-analyzer"
-wait_ready "http://localhost:${ANONYMIZER_PORT}/health" "presidio-anonymizer"
+echo "▶ Sending each export through $GATEWAY/guardrails/apply_guardrail ..."
+python3 "$SCRIPT_DIR/gateway_bench.py" --corpus "$OUT_DIR" --out "$OUT_DIR" --gateway "$GATEWAY"
 
 echo ""
-echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║  PII DETECTION SCORING — CSV vs Markdown vs minified JSON     ║"
-echo "╚══════════════════════════════════════════════════════════════╝"
-
-for fmt in csv md json; do
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  FORMAT: ${fmt}"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  python3 "$SCRIPT_DIR/score.py" \
-    "$OUT_DIR/export.${fmt}" \
-    "$OUT_DIR/truth.json" \
-    "http://localhost:${ANALYZER_PORT}" \
-    "http://localhost:${ANONYMIZER_PORT}" \
-    "$OUT_DIR/${fmt}.masked.txt"
-done
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Evidence written to: ${OUT_DIR}"
-echo "  *.masked.txt shows exactly what Presidio would send onward for"
-echo "  each format — open them to \"see what has been masked\"."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Report:       $OUT_DIR/report.md"
+echo "Masked files: $OUT_DIR/masked/  (exactly what LiteLLM would send to Anthropic)"

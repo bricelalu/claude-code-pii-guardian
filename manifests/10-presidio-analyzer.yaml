@@ -12,6 +12,18 @@ metadata:
 data:
   # Rendered at startup by the nginx image's envsubst step (templates -> conf.d).
   default.conf.template: |
+    # IPv4 only: RunPod publishes AAAA records but the cluster has no IPv6 egress.
+    resolver kube-dns.kube-system.svc.cluster.local ipv6=off valid=300s;
+
+    # Pooled TLS connections to RunPod: without keepalive every /analyze paid a new TCP + TLS
+    # handshake to the EU data center. "resolve" re-resolves the name while running (nginx >= 1.27.3).
+    upstream runpod {
+        zone runpod 64k;
+        server ${RUNPOD_ENDPOINT_ID}.api.runpod.ai:443 resolve;
+        keepalive 8;
+        keepalive_timeout 120s;
+    }
+
     server {
         listen 3000;
 
@@ -23,14 +35,13 @@ data:
         }
 
         location = /analyze {
-            # Resolve at request time, IPv4 only: RunPod publishes AAAA records but the cluster
-            # has no IPv6 egress, so a startup-resolved upstream wastes attempts on unreachable IPs.
-            resolver kube-dns.kube-system.svc.cluster.local ipv6=off valid=300s;
-            set $runpod_upstream ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
-            proxy_pass https://$runpod_upstream/analyze;
-            proxy_set_header Host $runpod_upstream;
+            proxy_pass https://runpod/analyze;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
             proxy_set_header Authorization "Bearer ${RUNPOD_API_KEY}";
-            proxy_ssl_name $runpod_upstream;
+            proxy_ssl_name ${RUNPOD_ENDPOINT_ID}.api.runpod.ai;
+            proxy_ssl_session_reuse on;
             proxy_ssl_server_name on;
             proxy_ssl_verify on;
             proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;

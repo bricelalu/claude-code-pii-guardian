@@ -201,6 +201,8 @@ tasks:
         kubectl rollout status deployment/traefik -n kube-system --timeout=90s 2>/dev/null || true
 
         kubectl apply -f manifests/21-litellm-config.yaml
+        kubectl create configmap litellm-guardrail -n "{{.NAMESPACE}}" --from-file=guardrail/code_guard.py \
+          --dry-run=client -o yaml | kubectl apply -f -
         kubectl apply -f manifests/10-presidio-analyzer.yaml
         kubectl apply -f manifests/11-presidio-anonymizer.yaml
         kubectl apply -f manifests/22-litellm.yaml
@@ -267,6 +269,8 @@ tasks:
       - |
         set -euo pipefail
         kubectl apply -f manifests/21-litellm-config.yaml
+        kubectl create configmap litellm-guardrail -n "{{.NAMESPACE}}" --from-file=guardrail/code_guard.py \
+          --dry-run=client -o yaml | kubectl apply -f -
         kubectl rollout restart deployment/litellm -n "{{.NAMESPACE}}"
         kubectl rollout status deployment/litellm -n "{{.NAMESPACE}}" --timeout=120s
         echo "✓ Config reloaded — gateway still reachable at {{.LITELLM_HTTP_URL}}"
@@ -395,7 +399,7 @@ tasks:
 # ─────────────────────────────────────────────────────────────────
 
   pii-score:
-    desc: Score Presidio's masking ratio and false-positive ratio across CSV, Markdown, and minified-JSON exports of a fake PII dataset
+    desc: Export the 50-row fictional customers table (French open data) as CSV, Markdown and minified JSON, and report what the gateway masks per format and column
     cmds:
       - |
         set -euo pipefail
@@ -425,3 +429,8 @@ tasks:
           fi
         done
         bash scripts/pii-score/bench.sh
+
+  pii-bench-gateway:
+    desc: End-to-end GLiNER2 benchmark through the running gateway (LiteLLM → proxy → RunPod); per-file masked/not-masked report
+    cmds:
+      - bash scripts/pii-score/bench-gateway.sh

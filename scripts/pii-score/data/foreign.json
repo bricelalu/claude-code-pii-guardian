@@ -1,0 +1,27 @@
+{
+  "_comment": "Hand-curated (not open data) Spanish, Italian and English samples for customers.py. Street addresses are plausible, not real people's homes.",
+  "es": {
+    "country": "España",
+    "firstnames": [["Lucía", "F"], ["Javier", "M"], ["Carmen", "F"], ["Alejandro", "M"], ["Marta", "F"], ["Sergio", "M"], ["Paula", "F"], ["Diego", "M"], ["Elena", "F"], ["Raúl", "M"]],
+    "lastnames": ["Fernández", "Morales", "Ruiz", "Navarro", "Gil", "Ortega", "Romero", "Castillo", "Vázquez", "Serrano"],
+    "addresses": [["Calle Mayor 14", "28013", "Madrid"], ["Carrer de Mallorca 245", "08008", "Barcelona"], ["Calle Sierpes 32", "41004", "Sevilla"], ["Avenida del Puerto 120", "46023", "Valencia"], ["Calle Larios 5", "29005", "Málaga"]],
+    "phone_prefix": "+34",
+    "email_domains": ["correo-demo.es", "empresa-ejemplo.es"]
+  },
+  "it": {
+    "country": "Italia",
+    "firstnames": [["Giulia", "F"], ["Marco", "M"], ["Francesca", "F"], ["Alessandro", "M"], ["Chiara", "F"], ["Lorenzo", "M"], ["Martina", "F"], ["Davide", "M"], ["Sara", "F"], ["Matteo", "M"]],
+    "lastnames": ["Rossi", "Bianchi", "Romano", "Ricci", "Colombo", "Greco", "Bruno", "Gallo", "Conti", "De Luca"],
+    "addresses": [["Via Roma 8", "40121", "Bologna"], ["Corso Buenos Aires 23", "20124", "Milano"], ["Via Toledo 156", "80134", "Napoli"], ["Via Po 12", "10123", "Torino"], ["Via dei Mille 19", "00185", "Roma"]],
+    "phone_prefix": "+39",
+    "email_domains": ["posta-demo.it", "azienda-esempio.it"]
+  },
+  "en": {
+    "country": "United Kingdom",
+    "firstnames": [["Oliver", "M"], ["Charlotte", "F"], ["Harriet", "F"], ["Samuel", "M"], ["Grace", "F"], ["Thomas", "M"], ["Eleanor", "F"], ["Callum", "M"], ["Imogen", "F"], ["Joshua", "M"]],
+    "lastnames": ["Thompson", "Hughes", "Whitfield", "Okafor", "Pemberton", "Briggs", "Hartley", "Doherty", "Fairfax", "Ellery"],
+    "addresses": [["14 Kingsway Road", "M19 2LL", "Manchester"], ["7 Riverside Crescent", "LS1 4AP", "Leeds"], ["52 Queensway", "BS1 5TR", "Bristol"], ["3 Harbour Lane", "EH6 6QX", "Edinburgh"], ["21 Castle Street", "CF10 1BS", "Cardiff"]],
+    "phone_prefix": "+44",
+    "email_domains": ["mail-demo.co.uk", "example-trading.co.uk"]
+  }
+}

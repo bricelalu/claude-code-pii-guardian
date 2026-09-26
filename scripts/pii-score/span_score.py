@@ -12,7 +12,7 @@ checks the file still parses (CSV/Markdown/JSON) or compiles (code).
 `collect` calls /analyze once per corpus file at the lowest configured floor and
 stores every raw detection, so `report` can re-threshold offline.
 
-Matching rule (same as score.py's classify): a detection is a true positive if it
+Matching rule: a detection is a true positive if it
 overlaps a true span of the same entity type; any other detection is a false
 positive; a true span with no same-type detection is a false negative, even if a
 detection of another type covers it. Several detections on one true span count
@@ -34,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "bench" / "corpus"))
 from generate import syntax_check  # noqa: E402
-from score import ANALYZE_FLOOR, AUDIT_TIER, MASK_TIER, http_post_json, locate_spans, overlaps  # noqa: E402
+from common import ANALYZE_FLOOR, AUDIT_TIER, MASK_TIER, http_post_json, overlaps  # noqa: E402
 
 GATEWAY_THRESHOLDS = {**MASK_TIER, **AUDIT_TIER}
 FOCUS = ["PERSON", "LOCATION"]
@@ -48,18 +48,14 @@ def context_line(text, start):
 
 
 def add_exports(args):
-    """Copy the pii-score CSV/Markdown/JSON exports into the corpus, with their PERSON/LOCATION spans."""
+    """Copy the customer exports (export.sh) into the corpus with their per-cell answer key."""
     src, corpus = Path(args.exports), Path(args.corpus)
-    rows = [r for r in json.loads((src / "truth.json").read_text(encoding="utf-8"))
-            if r["expected_entity"] in FOCUS]
     truth = json.loads((corpus / "truth.json").read_text(encoding="utf-8"))
     (corpus / "exports").mkdir(exist_ok=True)
-    for fmt in ("csv", "md", "json"):
-        text = (src / f"export.{fmt}").read_text(encoding="utf-8")
-        (corpus / "exports" / f"export.{fmt}").write_text(text, encoding="utf-8")
-        truth.append({"file": f"exports/export.{fmt}", "lang": "exports", "spans": [
-            {"start": s["start"], "end": s["end"], "entity": s["expected_entity"], "value": s["value"]}
-            for s in locate_spans(text, rows)]})
+    for entry in json.loads((src / "truth.json").read_text(encoding="utf-8")):
+        text = (src / entry["file"]).read_text(encoding="utf-8")
+        (corpus / "exports" / entry["file"]).write_text(text, encoding="utf-8")
+        truth.append({**entry, "file": f"exports/{entry['file']}"})
     (corpus / "truth.json").write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
 
 

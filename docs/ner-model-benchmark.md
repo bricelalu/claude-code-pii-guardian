@@ -4,10 +4,11 @@
 
 ## Executive summary
 
-**GLiNER2 is the only model that masks names and places without breaking the files they sit in,
-but it can't run on the gateway's hot path on CPU as-is.**
+**GLiNER2 is the only model that masks names and places without breaking the files they sit in.
+It is too slow on CPU, so it was deployed on a GPU (RunPod, EU); see
+[Outcome](#outcome-deployed-on-runpod-option-2).**
 
-| | spaCy EN *(gateway today)* | spaCy multilingual* | GLiNER v1 | **GLiNER2** |
+| | spaCy EN *(gateway before GLiNER2)* | spaCy multilingual* | GLiNER v1 | **GLiNER2** |
 |---|---|---|---|---|
 | PERSON: precision / recall | 60% / 75% | 58% / 85% | 99% / 95% | **100% / 94%** |
 | LOCATION: precision / recall | 54% / 46% | 28% / 69% | 42% / 98% | **100% / 93%** |
@@ -19,7 +20,7 @@ Scores use each model's best cutoffs, except GLiNER2, which uses the recommended
 \*spaCy multilingual was told each file's language in advance, which the gateway can't do, so its
 numbers are an upper bound.
 
-- **spaCy (current gateway)** misses 1 in 4 names and more than half of the places. It also
+- **spaCy (the gateway's model before GLiNER2)** misses 1 in 4 names and more than half of the places. It also
   masks code identifiers, which breaks 19 of 27 files: code no longer compiles, a CSV row loses
   its id, and **two JSON records silently disappear**.
 - **GLiNER v1** finds almost everything, but masks any identifier that *means* "name" or "city".
@@ -27,11 +28,9 @@ numbers are an upper bound.
 - **GLiNER2** at PERSON ≥ 0.85 / LOCATION ≥ 0.96 masked no code token and kept all 27 files
   valid, in French, English, Spanish and Italian. Its misses are consistent and explainable (see
   below).
-- **Blocker:** GLiNER2 on CPU takes about 5 s per 2 KB and ~26 s per 10 KB, and a 40 KB request
-  failed. Claude Code re-sends tens of KB on every request, so deploying it in place of spaCy
-  would make most gateway requests fail or time out. It needs a GPU, a faster runtime, or a
-  narrower scan scope before it can go on the request path (see
-  [Deployment options](#deployment-options)).
+- **CPU was the blocker:** GLiNER2 on CPU takes about 5 s per 2 KB and ~26 s per 10 KB, and a
+  40 KB request failed. It was resolved with a GPU (options 2 and 3 of
+  [Deployment options](#deployment-options)): a 12 KB export now takes 1.7 s through the gateway.
 
 ## What was measured
 
@@ -154,6 +153,8 @@ input size. Memory is about 1.5–2 GB per worker, versus under 1 GB for spaCy.
 3. **Scan less text.** The gateway re-scans the whole conversation on every request. Scanning
    only new content (the latest user message and tool results) would cut the input per request
    by an order of magnitude. That needs a guardrail change in LiteLLM, not just a model swap.
+   *Done in `code-guard`: only user text and tool results are scanned, and NER results are cached
+   per block, so a resent block costs nothing.*
 4. **Two-stage (hybrid):** a fast first pass (spaCy or patterns) picks candidate spans, and
    GLiNER2 re-checks only those. This needs a custom recognizer.
 
@@ -179,15 +180,21 @@ On a French Go file, it found every real name and city at 0.97–1.00, and the o
 
 Remaining gaps:
 - **Latency.** Under 1 s only up to about 3–4 KB. The model still runs in 32-bit precision with the
-  eager attention fallback. 16-bit precision (`gliner2` supports `quantize=True`) and scanning only
-  new messages (option 3) are the next levers.
-- **Cold start.** A fresh worker took about 6.5 minutes to become ready: waiting for a GPU, then
-  unpacking the 9.6 GB image even from RunPod's cache. LiteLLM fails closed, so requests during a
-  cold start are blocked.
+  eager attention fallback; 16-bit precision (`gliner2` supports `quantize=True`) is the next lever.
+  Scanning less text (option 3) is done in `code-guard`.
+- **Cold start.** The first worker took about 6.5 minutes to become ready (waiting for a GPU, then
+  unpacking the 9.6 GB image); later cold starts took 80–100 s. The guardrail waits up to about
+  3 minutes for the worker, then fails closed (blocks the request).
 - **GPU fork crash.** The first deployment failed with "Cannot re-initialize CUDA in forked
   subprocess": CUDA was initialized in gunicorn's master process before it forked the worker. It is
   fixed with `PYTORCH_NVML_BASED_CUDA_CHECK=1` and `PRESIDIO_DEVICE=cuda`, set in the endpoint
   configuration.
+
+In production the analyzer is called by the `code-guard` LiteLLM guardrail, which also decides
+which parts of a Claude Code request are scanned and fixes several GLiNER2 false positives found
+on real traffic (role nouns such as "customer 2" scored as PERSON, for instance). Scope, rules,
+the Claude Code A/B test and a latency breakdown:
+[claude-code-guardrail.md](claude-code-guardrail.md).
 
 ## Supply-chain notes
 
