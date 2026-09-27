@@ -288,8 +288,8 @@ class EditedPathMatchingTest(unittest.TestCase):
         asyncio.run(masker.mask_request(data))
         return data["messages"][1]["content"][0]["content"]
 
-    def test_notebook_edit_uses_notebook_path_not_file_path(self):
-        self.assertEqual(self.run_request("NotebookEdit", {"notebook_path": "/nb/analysis.ipynb"},
+    def test_notebook_edit_file_path_unmasks_the_matching_read(self):
+        self.assertEqual(self.run_request("NotebookEdit", {"file_path": "/nb/analysis.ipynb"},
                                           "/nb/analysis.ipynb"),
                          "name\nJean Dupont")
 

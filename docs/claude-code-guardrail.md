@@ -44,17 +44,17 @@ The gateway sits between Claude Code on developer laptops and the Anthropic API.
 | Bash, Grep and other tool results | ✅ | Command output, search hits |
 | Read of a data file (`.csv`, `.tsv`, `.json`, `.jsonl`, `.md`, `.txt`, `.log`, `.xml`, `.sql`) or of an unknown type | ✅ | Exports and dumps. List: `data_extensions` in the config |
 | Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `.yaml`, `Dockerfile`…) | ❌ | Claude quotes it exactly in its Edits |
-| Read of a path a Write / Edit / MultiEdit / NotebookEdit targets anywhere in the same request | ❌ | The developer is editing that exact file right now, whatever its extension — a k8s manifest or a `.json` export being patched must stay readable (pii-guardian-qdu.5) |
+| Read of a `file_path` a Write / Edit / MultiEdit / NotebookEdit targets anywhere in the same request | ❌ | The developer is editing that exact file right now, whatever its extension — a k8s manifest or a `.json` export being patched must stay readable (pii-guardian-qdu.5) |
 | Write / Edit / MultiEdit / NotebookEdit results | ❌ | They echo the file being edited |
 | `tool_use` input (paths, commands, `old_string`) | ❌ | Claude's tool calls must reach the tools unchanged |
 | System prompt, Claude's own replies | ❌ | Written by Claude Code / Claude |
 | Paths and URLs (`/Users/<name>/…`, `https://…`, `Europe/Paris`) | ❌ | A masked path breaks every tool call that reuses it |
 
 **How a file counts as code.** First, the guardrail checks whether any `Write`/`Edit`/`MultiEdit`/
-`NotebookEdit` `tool_use` anywhere in the same request targets the exact same `file_path` (or
-`notebook_path`) string as the Read — no basename or path-normalisation matching, since a loose
-match is a leak surface. If so, the Read is code, whatever its extension: the request itself is the
-source of truth that the developer is editing that file right now. Otherwise, the guardrail finds
+`NotebookEdit` `tool_use` anywhere in the same request targets the exact same `file_path` string as
+the Read — no basename or path-normalisation matching, since a loose match is a leak surface. If so,
+the Read is code, whatever its extension: the request itself is the source of truth that the
+developer is editing that file right now. Otherwise, the guardrail finds
 the `tool_use` that produced the Read result, takes its `file_path`, and asks `pygments` whether it
 knows the language (`find_lexer_class_for_filename`). `pygments` ships with LiteLLM's proxy image
 (`litellm[proxy]` → `rich` → `pygments`) and knows 500+ formats. Data extensions (`data_extensions`)

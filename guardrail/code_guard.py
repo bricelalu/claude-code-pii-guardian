@@ -6,9 +6,9 @@ Scope (Anthropic /v1/messages shape):
             Read of data files (csv, json, md...)
   untouched system prompt, assistant text, tool_use input, results of the `skip_tools` tools
             (Write/Edit: their result echoes the file Claude is editing), Read of code files
-            (Claude must quote them exactly to edit them), Read of a path a Write/Edit/MultiEdit/
-            NotebookEdit targets anywhere in the same request (it's being edited right now,
-            whatever its extension), paths and URLs
+            (Claude must quote them exactly to edit them), Read of a file_path a Write/Edit/
+            MultiEdit/NotebookEdit targets anywhere in the same request (it's being edited right
+            now, whatever its extension), paths and URLs
 JSON tool results (MCP): strings holding escaped documents (a table or CSV in a "content" field,
 JSON inside JSON) are decoded and masked as documents of their own, then re-serialized.
 
@@ -243,10 +243,10 @@ class Masker:
                  for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
         # A path a Write/Edit/MultiEdit/NotebookEdit targets anywhere in this request is being
         # edited right now: its Read is code whatever the extension says (pii-guardian-qdu.5).
-        # Exact file_path/notebook_path string match only, never basename.
-        edited_paths = {p for b in tools.values() if b.get("name") in self.skip_tools
-                        for p in [(b.get("input") or {}).get("file_path")
-                                  or (b.get("input") or {}).get("notebook_path")] if isinstance(p, str)}
+        # Exact file_path string match only, never basename.
+        edited_paths = {(b.get("input") or {}).get("file_path") for b in tools.values()
+                        if b.get("name") in self.skip_tools}
+        edited_paths = {p for p in edited_paths if isinstance(p, str)}
         targets = []
         for m in messages:
             content = m.get("content")
