@@ -32,12 +32,16 @@ except ImportError:  # offline tests only exercise Masker
     CustomGuardrail = object
 
 # Paths and URLs are never masked: a username in /Users/<name>/ is PII-shaped but masking it
-# breaks every tool call that reuses the path. Tokens: URLs, Windows paths, anything with a "/".
-# ponytail: "Lyon/Paris" in prose also counts as a path; tighten if replays show leaks.
+# breaks every tool call that reuses the path. A slash is not enough on its own: "Lyon/Paris" in
+# prose has the shape of a path and is a leak, so a token is protected when it is a URL, a drive
+# path, starts with /, ~, ./ or ../, or ends in a file extension. "Europe/Paris" (a tz zone) is
+# the price of that rule: it is the same shape as the leak, and the city is masked. A file named
+# after a place ("Paris/app.yml") stays readable, because breaking the path is the worse failure.
 PROTECTED = re.compile(
     r"[A-Za-z][\w+.-]*://[^\s\"'`<>]+"
-    r"|\b[A-Za-z]:\\[^\s\"'`<>]+"
-    r"|[^\s\"'`,;:=(){}\[\]<>|]*/[^\s\"'`,;:=(){}\[\]<>|]*"
+    r"|\b[A-Za-z]:[\\/][^\s\"'`<>]+"
+    r"|(?<![\w.~-])[~.]*/[^\s\"'`,;:=(){}\[\]<>|]*"
+    r"|[^\s\"'`,;:=(){}\[\]<>|]*/[^\s\"'`,;:=(){}\[\]<>|]*\.\w{1,8}\b"
 )
 CACHE_MAX = 10_000
 
