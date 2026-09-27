@@ -121,8 +121,19 @@ class MaskTextTest(unittest.TestCase):
                      "cd ~/brice.lalu/Lyon && ls",
                      "see https://github.com/brice.lalu/Paris?x=jean@acme.fr",
                      r"C:\Users\brice.lalu\app",
-                     'TZ="Europe/Paris"'):
+                     "--config=Paris/app.yml",  # a file named after a place stays readable
+                     "path=/etc/nginx/nginx.conf"):
             self.assertEqual(mask_text(text), text)
+
+    def test_a_name_or_place_in_a_slash_token_is_masked(self):
+        self.assertEqual(mask_text("Jean Dupont/Lyon"), "<PERSON>/<LOCATION>")
+        self.assertEqual(mask_text("Lyon/Paris"), "<LOCATION>/<LOCATION>")
+        self.assertEqual(mask_text("the Lyon/Paris office"), "the <LOCATION>/<LOCATION> office")
+
+    def test_a_tz_zone_loses_its_city(self):
+        # "Europe/Paris" has exactly the shape of the leak above: nothing but the intent tells
+        # them apart, and the city is what ask 55 is about.
+        self.assertEqual(mask_text('TZ="Europe/Paris"'), 'TZ="Europe/<LOCATION>"')
 
     def test_path_next_to_a_name_masks_only_the_name(self):
         self.assertEqual(mask_text("Jean Dupont edited /Users/brice.lalu/x.py"),

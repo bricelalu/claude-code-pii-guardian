@@ -31,6 +31,10 @@ Key decisions, each backed by a measurement below:
 - PII inside code files (author lines, test fixtures) reaches Anthropic. That's the price of
   editable code.
 - Java Javadoc `@author` names (5 of 12) and one Terraform place (*Sheffield*) are missed.
+- A slash no longer exempts a token, so `Lyon/Paris` in prose is masked. The price is
+  `Europe/Paris`: it has the same shape, so a tz zone keeps its continent and loses its city. A
+  *file* named after a place (`--config=Paris/app.yml`) stays readable, since breaking a path is
+  the worse failure.
 - Each Claude Code task takes about 1.5–2× longer through the gateway.
 
 ## What gets masked
@@ -84,7 +88,7 @@ All in [`guardrail/`](../guardrail/). The live checks need `task up` and a RunPo
 
 | Check | What it proves | Result |
 |---|---|---|
-| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 31/31 (2 expected failures, see below; 25 + 5 skipped without `pygments`) |
+| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 33/33 (2 expected failures, see below; 28 + 5 skipped without `pygments`) |
 | `scope_check.py` (live) | Which blocks of a real `/v1/messages` request are scanned: a test card number in one block at a time must block the request only when that block is scanned | 8/8 |
 | `regex_sweep.py` (offline) | Regex false positives on real code | 14,594 files (240 MB, the LiteLLM image's site-packages): 5,152 matches before fencing, 2,227 after, mostly real emails/IPs in package metadata and docs |
 | `replay_sessions.py` (local only) | Regexes on your own `~/.claude/projects` transcripts | 26 sessions, 914 distinct scanned blocks (1.2 MB), 63 would change; found the infrastructure-IP issue. Report in `.pii-score-out/` (gitignored) |
