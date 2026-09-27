@@ -285,6 +285,7 @@ only what can carry a third party's PII. Full report, with every measurement:
 | Bash, Grep and other tool results | ✅ | Command output, search hits |
 | Read of a data file (`.csv`, `.json`, `.md`, `.txt`, `.sql`, …, or unknown type) | ✅ | Exports and dumps; the list is `data_extensions` in the config |
 | Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `Dockerfile`, …) | ❌ | Claude quotes it exactly in its Edits; the language is recognized with `pygments`, which ships with LiteLLM's proxy image |
+| Read of a `file_path` a Write / Edit / MultiEdit / NotebookEdit targets anywhere in the same request | ❌ | The request is the source of truth that this exact file (matched by identical `file_path` string, never basename) is being edited right now, whatever its extension |
 | Write / Edit / MultiEdit / NotebookEdit results | ❌ | They echo the file being edited; a mask there breaks the next Edit |
 | `tool_use` input (paths, commands, `old_string`) | ❌ | Claude's own tool calls must reach the tools unchanged |
 | System prompt, Claude's own replies | ❌ | Written by Claude Code / Claude, rescanning them only adds latency |

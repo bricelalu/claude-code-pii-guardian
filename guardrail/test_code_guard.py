@@ -93,6 +93,21 @@ def claude_code_request():
                 {"type": "tool_result", "tool_use_id": "m1", "content": [{"type": "text", "text": json.dumps(
                     {"content": "| name | phone |\n|---|---|\n| Jean Dupont | 06 12 34 56 78 |"})}]},
             ]},
+            # pii-guardian-qdu.5: a .json export the request is also editing (e2) reads as code;
+            # a same-extension export it never edits (r4) stays masked, whatever pygments thinks.
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "r3", "name": "Read", "input": {"file_path": "/data/customers.json"}},
+                {"type": "tool_use", "id": "r4", "name": "Read",
+                 "input": {"file_path": "/data/other_customers.json"}},
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "e2", "name": "Edit",
+                 "input": {"file_path": "/data/customers.json", "old_string": "a", "new_string": "b"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "r3", "content": "name\nJean Dupont"},
+                {"type": "tool_result", "tool_use_id": "r4", "content": "name\nJean Dupont"},
+            ]},
         ],
     }
 
@@ -274,8 +289,17 @@ class MaskRequestTest(unittest.TestCase):
 
     def test_system_assistant_and_tool_use_are_untouched(self):
         self.assertEqual(self.data["system"], self.original["system"])
-        for i in (1, 3, 5, 7):
+        for i in (1, 3, 5, 7, 9, 10):
             self.assertEqual(self.msgs[i], self.original["messages"][i])
+
+    def test_read_of_a_path_the_request_is_also_editing_is_untouched(self):
+        # /data/customers.json is targeted by the Edit at id "e2" elsewhere in this same request.
+        self.assertEqual(self.msgs[11]["content"][0], self.original["messages"][11]["content"][0])
+
+    def test_read_of_a_same_extension_path_the_request_does_not_edit_is_still_masked(self):
+        # /data/other_customers.json is never edited: the leak guard, matching is by exact
+        # file_path string, not by extension or basename.
+        self.assertEqual(self.msgs[11]["content"][1]["content"], "name\n<PERSON>")
 
     def test_history_is_analyzed_once_across_turns(self):
         before = len(self.calls)
@@ -357,6 +381,36 @@ class CodeCorpusRequestTest(unittest.TestCase):
         # Known failure: a Bash result carries no file path, so it cannot be told from a data dump.
         # The decision on it is pii-guardian-qdu.4's to record.
         self.assertEqual(self.changed("Bash"), [])
+
+
+class EditedPathMatchingTest(unittest.TestCase):
+    """The path-match rule (pii-guardian-qdu.5) is a leak surface: assert its edges directly."""
+
+    @staticmethod
+    def run_request(edit_name, edit_input, read_path):
+        masker, _ = make_masker()
+        data = {"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "e1", "name": edit_name, "input": edit_input},
+                {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": read_path}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "r1", "content": "name\nJean Dupont"},
+            ]},
+        ]}
+        asyncio.run(masker.mask_request(data))
+        return data["messages"][1]["content"][0]["content"]
+
+    def test_notebook_edit_file_path_unmasks_the_matching_read(self):
+        self.assertEqual(self.run_request("NotebookEdit", {"file_path": "/nb/analysis.ipynb"},
+                                          "/nb/analysis.ipynb"),
+                         "name\nJean Dupont")
+
+    def test_basename_alone_does_not_match(self):
+        # Same filename, different directory: exact file_path string only, never basename.
+        self.assertEqual(self.run_request("Edit", {"file_path": "/data/customers.json"},
+                                          "/other/dir/customers.json"),
+                         "name\n<PERSON>")
 
 
 class CacheTest(unittest.TestCase):
