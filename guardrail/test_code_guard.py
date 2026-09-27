@@ -31,7 +31,7 @@ NER = {
 THRESHOLDS = {"PERSON": 0.85, "LOCATION": 0.96, "CREDIT_CARD": 0.6}
 
 
-def make_masker():
+def make_masker(block=()):
     calls = []
 
     async def analyze(text):
@@ -44,7 +44,7 @@ def make_masker():
                 start = text.find(needle, start + 1)
         return out
 
-    masker = Masker(analyze, REGEXES, THRESHOLDS, block=["CREDIT_CARD"],
+    masker = Masker(analyze, REGEXES, THRESHOLDS, block=block,  # production blocks nothing
                     skip_tools=["Write", "Edit", "MultiEdit", "NotebookEdit"], data_extensions=DATA_EXTENSIONS)
     return masker, calls
 
@@ -124,9 +124,14 @@ class MaskTextTest(unittest.TestCase):
         self.assertEqual(mask_text("Jean Dupont edited /Users/brice.lalu/x.py"),
                          "<PERSON> edited /Users/brice.lalu/x.py")
 
-    def test_credit_card_blocks(self):
+    def test_credit_card_is_masked_not_blocked(self):
+        # A blocked card stays in the history Claude Code resends every turn: it would lock the session.
+        self.assertEqual(mask_text("card 4111 1111 1111 1111"), "card <CREDIT_CARD>")
+
+    def test_blocking_is_still_available_when_configured(self):
+        masker, _ = make_masker(block=["CREDIT_CARD"])
         with self.assertRaises(Blocked):
-            mask_text("card 4111 1111 1111 1111")
+            asyncio.run(masker.mask_texts(["card 4111 1111 1111 1111"]))
 
     def test_card_inside_an_iban_is_masked_not_blocked(self):
         self.assertEqual(mask_text("iban FR76 3341 2328 1206 7974 0344 702"), "iban [IBAN_REDACTED]")

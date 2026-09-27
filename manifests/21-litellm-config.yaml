@@ -48,12 +48,14 @@ data:
           # Names and places (NER), via Presidio + GLiNER2 on RunPod. Cutoffs from
           # docs/ner-model-benchmark.md (100% precision on code, held-out languages): code tokens
           # such as `fullName` score up to 0.81 and cloud regions (`us-east-1a`) up to 0.95.
-          # Credit cards BLOCK the request: Presidio validates the Luhn checksum.
+          # Credit cards (Luhn-checked by Presidio) are masked as <CREDIT_CARD>, not blocked: a blocked
+          # value stays in the history Claude Code resends every turn, so one test card in a tool
+          # result would fail every later request until /clear. block_entities is left empty.
           ner_thresholds:
             PERSON: 0.85
             LOCATION: 0.96
             CREDIT_CARD: 0.6
-          block_entities: ["CREDIT_CARD"]
+          block_entities: []
           # Their tool_result echoes the file being edited; masking it breaks the next Edit.
           skip_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit"]
           # Read results of code files are not masked (pygments recognizes the language, e.g.

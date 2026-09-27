@@ -61,8 +61,10 @@ its `model_armor` file scanning maps MIME types of attachments. Neither identifi
 ## Detection
 
 - **Names, places, cards:** Presidio + GLiNER2 on the RunPod GPU. Cutoffs PERSON ≥ 0.85,
-  LOCATION ≥ 0.96 ([NER benchmark](ner-model-benchmark.md)). A Luhn-valid card **blocks** the
-  request (HTTP 400).
+  LOCATION ≥ 0.96 ([NER benchmark](ner-model-benchmark.md)). A Luhn-valid card is masked as
+  `<CREDIT_CARD>`. It used to **block** the request; that was dropped because Claude Code resends
+  the whole conversation every turn, so one blocked test card in a tool result failed every later
+  request until `/clear`. Blocking is still available per entity (`block_entities`), empty by default.
 - **Email, phones, IBAN, IPv4/IPv6:** regexes in `REGEXES` (`code_guard.py`), in the same pass.
   Placeholders: `<PERSON>`, `<LOCATION>`, `[EMAIL_REDACTED]`, `[PHONE_FR_REDACTED]`…
 
@@ -85,7 +87,7 @@ All in [`guardrail/`](../guardrail/). The live checks need `task up` and a RunPo
 | Check | What it proves | Result |
 |---|---|---|
 | `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 27/27 (25 + 2 skipped without `pygments`) |
-| `scope_check.py` (live) | Which blocks of a real `/v1/messages` request are scanned: a test card number in one block at a time must block the request only when that block is scanned | 8/8 |
+| `scope_check.py` (live) | Which blocks of a real `/v1/messages` request reach Anthropic masked: a unique test email in one block at a time, and Haiku is asked to list every email it can see | 8/8 |
 | `regex_sweep.py` (offline) | Regex false positives on real code | 14,594 files (240 MB, the LiteLLM image's site-packages): 5,152 matches before fencing, 2,227 after, mostly real emails/IPs in package metadata and docs |
 | `replay_sessions.py` (local only) | Regexes on your own `~/.claude/projects` transcripts | 26 sessions, 914 distinct scanned blocks (1.2 MB), 63 would change; found the infrastructure-IP issue. Report in `.pii-score-out/` (gitignored) |
 | `claude_ab.py` (live) | Can Claude Code still do its job through the gateway? | See below |

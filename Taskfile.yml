@@ -318,7 +318,7 @@ tasks:
 # ─────────────────────────────────────────────────────────────────
 
   demo:
-    desc: Run the full PII-Guardian demo — MASK, AUDIT, and BLOCK scenarios
+    desc: Run the full PII-Guardian demo — MASK, AUDIT, and CARD scenarios
     cmds:
       - |
         set -euo pipefail
@@ -380,11 +380,11 @@ tasks:
         # ── Scenario 2: AUDIT ────────────────────────────────────
         bash demo/scenario-audit.sh
 
-        read -rn1 -p "Press any key for Scenario 3 (BLOCK)..." _
+        read -rn1 -p "Press any key for Scenario 3 (CARD)..." _
         echo ""
 
-        # ── Scenario 3: BLOCK ────────────────────────────────────
-        bash demo/scenario-block.sh
+        # ── Scenario 3: CARD ─────────────────────────────────────
+        bash demo/scenario-card.sh
 
         # ── Final banner ─────────────────────────────────────────
         echo ""

@@ -27,7 +27,7 @@ task demo
 ```
 
 The demo brings up a local K3D cluster, routes Claude Code through a LiteLLM + Presidio gateway,
-and walks through three scenarios proving **MASK**, **AUDIT**, and **BLOCK** behaviors. (AUDIT is
+and walks through three scenarios proving **MASK**, **AUDIT**, and **CARD** (card masking) behaviors. (AUDIT is
 currently disabled: see [9.2](#92-scenario-audit--demoscenario-auditsh).)
 
 ---
@@ -70,7 +70,7 @@ authentication options (including the subscription-only path).
 |---------|-------------|
 | `task pin-images` | Pull images and write SHA-256 digests into manifests (run once) |
 | `task up` | Create K3D cluster, apply manifests, wait for Ready |
-| `task demo` | Full demo — MASK, AUDIT, BLOCK scenarios |
+| `task demo` | Full demo — MASK, AUDIT, CARD scenarios |
 | `task down` | Stop the cluster (preserves state) |
 | `task clean` | Delete the cluster entirely |
 | `task verify-images` | Re-pull and verify digests match manifests |
@@ -101,7 +101,7 @@ This POC validates the architecture locally on **K3D** before any consideration 
 A single task demo command that:
 1. Brings up a local K3D cluster with LiteLLM + Presidio (analyzer + anonymizer)
 2. Configures the operator's Claude Code CLI to route through the local gateway via ANTHROPIC_BASE_URL
-3. Executes three scenarios proving **MASK**, **AUDIT**, and **BLOCK** behaviors
+3. Executes three scenarios proving **MASK**, **AUDIT**, and **CARD** behaviors
 4. Displays clear evidence (LiteLLM logs, before/after prompt bodies) that the protection layer worked
 The POC must be reproducible and tear-downable with task clean.
 
@@ -152,7 +152,7 @@ graph TD
     
     LLM["⚡ LiteLLM Proxy<br/>Port 4000 | /v1/messages"]
     
-    PRE["🛡️ code-guard (guardrail/code_guard.py)<br/>scans: user text + tool results (not Write/Edit)<br/>MASK: PERSON ≥ 0.85, LOCATION ≥ 0.96 (GLiNER2)<br/>MASK: email, phone, IBAN, IPv4/IPv6 (regex)<br/>BLOCK: credit_card"]
+    PRE["🛡️ code-guard (guardrail/code_guard.py)<br/>scans: user text + tool results (not Write/Edit)<br/>MASK: PERSON ≥ 0.85, LOCATION ≥ 0.96 (GLiNER2)<br/>MASK: email, phone, IBAN, IPv4/IPv6 (regex)<br/>MASK: credit card (Luhn-checked)"]
     
     ANALYZER["🔍 presidio-analyzer (in cluster)<br/>nginx proxy, port 3000<br/>adds RunPod bearer key"]
     
@@ -229,8 +229,9 @@ in source code without masking code tokens. spaCy masked identifiers such as `s.
 
 Deterministic values (emails, phone numbers, IBANs, IPv4/IPv6 addresses) don't need a model. They
 are matched by regexes in the same guardrail, inside the LiteLLM pod, in one pass with GLiNER2 over
-the original text. IBANs are masked (and checksum-verified), not blocked. Credit cards **BLOCK** the
-request, because Presidio validates the card number's Luhn checksum.
+the original text. IBANs are masked (and checksum-verified), not blocked. Credit cards are masked
+too (`<CREDIT_CARD>`, Luhn-checked by Presidio), not blocked: Claude Code resends the whole
+conversation every turn, so a blocked card in one tool result would fail every later request.
 
 GLiNER2 needs a GPU to be usable on the request path (about 12 s per 10 KB on a laptop CPU), so the
 analyzer runs as a **RunPod serverless endpoint** and the cluster keeps a thin proxy:
@@ -314,7 +315,7 @@ On the A/B tasks, Claude Code was about 1.5–2× slower through the gateway. Sp
 chunks didn't pay off; the details are in the report.
 
 **Checks** (in [`guardrail/`](guardrail/)): `test_code_guard.py` (offline unit tests),
-`scope_check.py` (which blocks of a real request get scanned), `regex_sweep.py` (regex false
+`scope_check.py` (which blocks of a real request reach Anthropic masked), `regex_sweep.py` (regex false
 positives on real code), `replay_sessions.py` (your own sessions, locally), `claude_ab.py` (the
 A/B above).
 
@@ -378,7 +379,7 @@ pii-guardian/
 ├── demo/
 │   ├── scenario-mask.sh
 │   ├── scenario-audit.sh
-│   ├── scenario-block.sh
+│   ├── scenario-card.sh
 │   └── show-evidence.sh
 ├── scripts/
 │   └── pii-score/
@@ -484,12 +485,12 @@ guardrails:
       mode: "pre_call"
       default_on: true
       # Names and places (NER): Presidio + GLiNER2 on RunPod. Cutoffs from
-      # docs/ner-model-benchmark.md. Credit cards (Luhn-checked) block the request.
+      # docs/ner-model-benchmark.md. Credit cards (Luhn-checked) are masked, not blocked.
       ner_thresholds:
         PERSON: 0.85
         LOCATION: 0.96
         CREDIT_CARD: 0.6
-      block_entities: ["CREDIT_CARD"]
+      block_entities: []
       skip_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit"]
       # Read results of code files (pygments knows the language) are not masked, except these:
       data_extensions: [".csv", ".tsv", ".json", ".jsonl", ".ndjson", ".md", ".markdown", ".txt", ".log", ".xml", ".sql"]
@@ -549,7 +550,7 @@ Sequence:
 6. Pause for keypress (read -n 1 -p "Press any key for Scenario 2...")
 7. Run **Scenario 2: AUDIT** → demo/scenario-audit.sh
 8. Pause
-9. Run **Scenario 3: BLOCK** → demo/scenario-block.sh
+9. Run **Scenario 3: CARD** → demo/scenario-card.sh
 10. Final banner: "Demo complete. Run task logs for the full audit trail."
 
 ## 9. Demo Scenarios
@@ -578,14 +579,15 @@ Each scenario script must:
   in `manifests/21-litellm-config.yaml`, and code-guard masks *Paris* and *Sarah* anyway. This
   scenario still runs in `task demo` but shows no audit event until the audit layer is back.
 **Verdict line:** "Soft PII not blocked, but flagged for review. This is the safety net."
-### 9.3 Scenario BLOCK — demo/scenario-block.sh
+### 9.3 Scenario CARD — demo/scenario-card.sh
 **Prompt:**
 > "Help me parse this transaction log: card 4111-1111-1111-1111 charged 89.50 EUR on 2026-05-12."
 **Expected evidence:**
-- code-guard detects CREDIT_CARD (Luhn-checked) and blocks
-- LiteLLM returns HTTP 400 ("Blocked by code-guard: CREDIT_CARD detected") — Claude Code surfaces an error to the user
-- Logs confirm the request never left the gateway
-**Verdict line:** "Credit card detected — request blocked. Anthropic never saw it."
+- code-guard detects CREDIT_CARD (Luhn-checked) and masks it: the body forwarded to Anthropic
+  holds `<CREDIT_CARD>`
+- Claude answers normally, and later requests of the session keep working (a blocked card used to
+  fail every later request, because Claude Code resends the whole conversation)
+**Verdict line:** "Credit card masked — Anthropic never saw the number, and the session keeps working."
 
 ## 10. Show-Evidence Helper
 demo/show-evidence.sh is invoked by each scenario. It must:
@@ -600,7 +602,7 @@ A reviewer running task demo on a clean machine must observe:
 2. Three scenarios execute sequentially with clear visual demarcation
 3. **MASK** scenario shows side-by-side "user input" vs "sent to Anthropic" with PII visibly redacted
 4. **AUDIT** scenario shows a detection log entry without prompt modification (currently disabled, see 9.2)
-5. **BLOCK** scenario produces a clear error from Claude Code and an HTTP 400 "Blocked by code-guard" in LiteLLM logs
+5. **CARD** scenario shows `<CREDIT_CARD>` in the body forwarded to Anthropic, and Claude still answers
 6. task verify-images confirms image digests match before task up proceeds
 7. task clean removes the cluster in under **30 seconds**
 8. Re-running task demo after task clean works without manual intervention
@@ -755,5 +757,5 @@ including every value that was or wasn't masked, are in
   (regex guardrail first), the placeholder lowered the name's score: Terraform dropped to 11/12
   PERSON and 6/8 LOCATION, and exports to 95/100 (CSV) and 99/100 (Markdown).
 - **IBANs vs cards.** 3 of the 50 generated IBANs contain a Luhn-valid 16-digit run, which Presidio
-  reports as a credit card and would block the whole request. A NER hit inside a regex hit now
+  reports as a credit card (which then blocked the whole request). A NER hit inside a regex hit now
   defers to it.
