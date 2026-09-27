@@ -43,7 +43,7 @@ def main():
     blocks = {}  # text -> session name (deduplicated: history repeats across turns)
     sessions = sorted(args.projects.glob("*/*.jsonl"))
     for path in sessions:
-        for container, key in masker._targets(session_messages(path)):
+        for container, key, _tool_use in masker._targets(session_messages(path)):
             blocks.setdefault(container[key], path.parent.name)
     hits = collections.defaultdict(collections.Counter)
     lines = []

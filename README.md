@@ -282,10 +282,12 @@ only what can carry a third party's PII. Full report, with every measurement:
 |---|---|---|
 | What the developer types (user text blocks) | ✅ | Prompts, pasted data |
 | MCP tool results (JSON, Markdown tables, CSV) | ✅ | Customer data from other systems. Escaped documents inside JSON strings (a table in a `content` field, JSON in JSON) are decoded and masked as documents of their own |
-| Bash, Grep and other tool results | ✅ | Command output, search hits |
+| Bash and other tool results (no file can be attributed to them) | ✅ | Command output; a `Bash` command is arbitrary shell, not a path |
+| Grep / Glob lines attributed to a data file | ✅ | Search hits; a hit inside `customers.csv` is still an export |
 | Read of a data file (`.csv`, `.json`, `.md`, `.txt`, `.sql`, …, or unknown type) | ✅ | Exports and dumps; the list is `data_extensions` in the config |
-| Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `Dockerfile`, …) | ❌ | Claude quotes it exactly in its Edits; the language is recognized with `pygments`, which ships with LiteLLM's proxy image |
+| Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `Dockerfile`, …) or of a notebook (`.ipynb`) | ❌ | Claude quotes it exactly in its Edits; the language is recognized with `pygments`, which ships with LiteLLM's proxy image |
 | Read of a `file_path` a Write / Edit / MultiEdit / NotebookEdit targets anywhere in the same request | ❌ | The request is the source of truth that this exact file (matched by identical `file_path` string, never basename) is being edited right now, whatever its extension |
+| Grep / Glob lines attributed to a code file | ❌ | Same reason: each line is checked (`path:line:text`) against the file it names |
 | Write / Edit / MultiEdit / NotebookEdit results | ❌ | They echo the file being edited; a mask there breaks the next Edit |
 | `tool_use` input (paths, commands, `old_string`) | ❌ | Claude's own tool calls must reach the tools unchanged |
 | System prompt, Claude's own replies | ❌ | Written by Claude Code / Claude, rescanning them only adds latency |

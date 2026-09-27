@@ -29,7 +29,11 @@ Key decisions, each backed by a measurement below:
 - Editing PII cells of a data file (CSV, JSON, Markdown…) through the gateway doesn't work: Claude
   only sees the masked copy.
 - PII inside code files (author lines, test fixtures) reaches Anthropic. That's the price of
-  editable code.
+  editable code. The same is now true of a notebook's own cells (`.ipynb` is treated as code, like
+  the file NotebookEdit writes back to) — including any customer rows a notebook's output cells
+  happen to hold, which reach Anthropic unmasked too.
+- A `Bash` result can't be tied to a file (the command is arbitrary shell), so it stays masked even
+  when it dumps a code file (`cat file.py`), unlike `Read`/`Grep`/`Glob` of that same file.
 - Java Javadoc `@author` names (5 of 12) and one Terraform place (*Sheffield*) are missed.
 - A slash no longer exempts a token, so `Lyon/Paris` in prose is masked. The price is
   `Europe/Paris`: it has the same shape, so a tz zone keeps its continent and loses its city. A
@@ -45,10 +49,12 @@ The gateway sits between Claude Code on developer laptops and the Anthropic API.
 |---|---|---|
 | What the developer types (user text blocks) | ✅ | Prompts, pasted data |
 | MCP tool results (JSON, Markdown tables, CSV) | ✅ | Customer data from other systems |
-| Bash, Grep and other tool results | ✅ | Command output, search hits |
+| Bash and other tool results (no file can be attributed to them) | ✅ | Command output; see Known limits |
+| Grep / Glob lines attributed to a data file | ✅ | Search hits; a hit inside `customers.csv` is still an export |
 | Read of a data file (`.csv`, `.tsv`, `.json`, `.jsonl`, `.md`, `.txt`, `.log`, `.xml`, `.sql`) or of an unknown type | ✅ | Exports and dumps. List: `data_extensions` in the config |
-| Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `.yaml`, `Dockerfile`…) | ❌ | Claude quotes it exactly in its Edits |
+| Read of a code file (`.py`, `.ts`, `.go`, `.tf`, `.yaml`, `Dockerfile`…) or of a notebook (`.ipynb`) | ❌ | Claude quotes it exactly in its Edits |
 | Read of a `file_path` a Write / Edit / MultiEdit / NotebookEdit targets anywhere in the same request | ❌ | The developer is editing that exact file right now, whatever its extension — a k8s manifest or a `.json` export being patched must stay readable (pii-guardian-qdu.5) |
+| Grep / Glob lines attributed to a code file | ❌ | Same reason: Claude quotes the line back in its Edit |
 | Write / Edit / MultiEdit / NotebookEdit results | ❌ | They echo the file being edited |
 | `tool_use` input (paths, commands, `old_string`) | ❌ | Claude's tool calls must reach the tools unchanged |
 | System prompt, Claude's own replies | ❌ | Written by Claude Code / Claude |
@@ -56,17 +62,22 @@ The gateway sits between Claude Code on developer laptops and the Anthropic API.
 
 **How a file counts as code.** First, the guardrail checks whether any `Write`/`Edit`/`MultiEdit`/
 `NotebookEdit` `tool_use` anywhere in the same request targets the exact same `file_path` string as
-the Read — no basename or path-normalisation matching, since a loose match is a leak surface. If so,
-the Read is code, whatever its extension: the request itself is the source of truth that the
-developer is editing that file right now. Otherwise, the guardrail finds
-the `tool_use` that produced the Read result, takes its `file_path`, and asks `pygments` whether it
-knows the language (`find_lexer_class_for_filename`). `pygments` ships with LiteLLM's proxy image
-(`litellm[proxy]` → `rich` → `pygments`) and knows 500+ formats. Data extensions (`data_extensions`)
-are masked even though `pygments` knows them — this residual list exists because `pygments`
-classifies formats like `.csv`/`.json`/`.md`/`.sql` as "a language it knows" while ask 55 names them
-as export/dump formats that must default to masked; the file_path match above is what lets an
-actually-edited file of one of those extensions through, without widening this list. If `pygments`
-is missing, every Read not covered by the file_path match is treated as data and masked.
+the Read (no basename or path-normalisation matching, since a loose match is a leak surface). If
+so, the Read is code, whatever its extension: the request itself shows the developer is editing
+that file right now. Otherwise, the guardrail finds the `tool_use` that produced the result. For
+`Read`/`NotebookRead` that's the whole result, exempted by `file_path`/`notebook_path`: `pygments`
+is asked whether it knows the language (`find_lexer_class_for_filename`), and a `.ipynb` counts as
+code even without a lexer for it, since `NotebookEdit` is what edits it back. `pygments` ships with
+LiteLLM's proxy image (`litellm[proxy]` → `rich` → `pygments`) and knows 500+ formats. Data
+extensions (`data_extensions`) are masked even though `pygments` knows them; the `file_path` match
+above is what lets an actually-edited file of one of those extensions through, without widening the
+list. If `pygments` is missing, every Read not covered by the `file_path` match is treated as data
+and masked (a `.ipynb` still isn't, since that check needs no lexer).
+
+For `Grep`/`Glob`, one result can mix hits from many files, so the exemption is per line: each line
+is checked for a leading `path:line:text` (or a bare `path`, `files_with_matches`/`Glob`) and the
+extracted path goes through the same `is_code_file` check as `Read`. A line whose shape doesn't
+name a file stays masked — the fail-safe default.
 
 LiteLLM's own `block_code_execution` guardrail only detects fenced code blocks inside text, and
 its `model_armor` file scanning maps MIME types of attachments. Neither identifies code files.
@@ -99,7 +110,7 @@ All in [`guardrail/`](../guardrail/). The live checks need `task up` and a RunPo
 
 | Check | What it proves | Result |
 |---|---|---|
-| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 33/33 (2 expected failures, see below; 28 + 5 skipped without `pygments`) |
+| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 43/43 (1 expected failure, see below; 37 + 6 skipped without `pygments`) |
 | `scope_check.py` (live) | Which blocks of a real `/v1/messages` request reach Anthropic masked: a unique test email in one block at a time, and Haiku is asked to list every email it can see | 8/8 |
 | `regex_sweep.py` (offline) | Regex false positives on real code | 14,594 files (240 MB, the LiteLLM image's site-packages): 5,152 matches before fencing, 2,227 after, mostly real emails/IPs in package metadata and docs |
 | `replay_sessions.py` (local only) | Regexes on your own `~/.claude/projects` transcripts | 26 sessions, 914 distinct scanned blocks (1.2 MB), 63 would change; found the infrastructure-IP issue. Report in `.pii-score-out/` (gitignored) |
@@ -117,15 +128,16 @@ the path `/v1/messages` takes.
 | Tool that echoes the file | Files changed by masking |
 |---|---|
 | `Read` | 0/24 |
-| `Grep` | 24/24 |
+| `Grep` | 0/24 |
 | `Bash` | 24/24 |
 
-Only `Read` is exempted from masking, so the same line comes back with `<[EMAIL_REDACTED]>` in it
-when `Grep` or `Bash` found it — the failed-`Edit` mode described above. The two are expected
-failures in the offline suite and are the specification of `pii-guardian-qdu.4`: the `Read` row has
-to match the other two. Offline, the figures come from the real regexes against the fake analyzer,
-and every corpus file carries a real email, so the gap between the rows is the exemption and not
-the analyzer. With the live model the names and cities go too, so re-measure after a fix.
+**pii-guardian-qdu.4** (this fix): a `Grep` hit is now attributed per line (`path:line:text`) to
+the file it came from, the same `is_code_file` check `Read` uses, so it matches `Read`'s row. `Bash`
+stays masked: its result can't be tied to a file (an arbitrary command, not a path), so the same
+`# Maintainer:` email trips it on every file — a known limit, not a bug, recorded above. Offline,
+the figures come from the real regexes against the fake analyzer, and every corpus file carries a
+real email, so the gap in the `Bash` row is the missing attribution and not the analyzer. With the
+live model the names and cities go too.
 
 ### Claude Code A/B (`claude_ab.py`)
 
