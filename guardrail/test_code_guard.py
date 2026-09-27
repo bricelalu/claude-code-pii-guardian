@@ -1,12 +1,16 @@
 """Offline tests for code_guard (no LiteLLM, no GPU): python3 guardrail/test_code_guard.py"""
 import asyncio
 import copy
+import functools
 import importlib.util
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from code_guard import DATA_EXTENSIONS, REGEXES, Blocked, Masker, is_code_file
+
+CORPUS_DIR = Path(__file__).resolve().parents[1] / "bench" / "corpus"
 
 HAS_PYGMENTS = importlib.util.find_spec("pygments") is not None  # shipped with LiteLLM's proxy image
 
@@ -244,6 +248,82 @@ class MaskRequestTest(unittest.TestCase):
         before = len(self.calls)
         asyncio.run(self.masker.mask_request(copy.deepcopy(self.original)))
         self.assertEqual(len(self.calls), before)
+
+
+@functools.lru_cache(maxsize=1)
+def corpus_files():
+    """The 24 bench corpus files (6 templates x 4 natural languages) as {name: text}.
+
+    bench/corpus/generate.py owns the rendering, so the corpus and the benchmark cannot drift.
+    Called in-process: no compiler, no gateway, no cluster.
+    """
+    spec = importlib.util.spec_from_file_location("bench_corpus_generate", CORPUS_DIR / "generate.py")
+    generate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generate)
+    files = {}
+    for fixture_path in sorted(generate.FIXTURES.glob("*.json")):
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        counters = {}
+        for template in sorted(p for p in generate.TEMPLATES.iterdir() if p.is_file()):
+            text, _spans = generate.render(template.read_text(encoding="utf-8"), fixture, counters)
+            files[f"{fixture_path.stem}/{template.name}"] = text
+    return files
+
+
+class CodeCorpusRequestTest(unittest.TestCase):
+    """Ask 50 ("never mask any code symbols that could break Claude Code"), measured through
+    mask_request, the path a /v1/messages request takes.
+
+    docs/ner-model-benchmark.md reports 0 code tokens masked over these 24 files, but it measures
+    them as raw text through /guardrails/apply_guardrail, which never reaches the scope decision.
+    Here every file is echoed back inside a tool_result, once per tool that returns one, which is
+    how a developer actually meets it.
+    """
+
+    def setUp(self):
+        self.masker, self.calls = make_masker()
+
+    def echoed_by(self, tool, name, text):
+        """Mask one real request whose tool_result echoes the file, and return what came back."""
+        inputs = {
+            "Read": {"file_path": f"/src/{name}"},
+            "Grep": {"pattern": "Maintainer", "path": "/src", "output_mode": "content"},
+            "Bash": {"command": f"cat /src/{name}"},
+        }
+        data = {"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": tool, "input": inputs[tool]}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": text}]},
+        ]}
+        asyncio.run(self.masker.mask_request(data))
+        return data["messages"][1]["content"][0]["content"]
+
+    def changed(self, tool):
+        """Which files the tool echoed back altered. Every file is exercised, whatever the verdict."""
+        return [name for name, text in corpus_files().items()
+                if self.echoed_by(tool, name, text) != text]
+
+    def test_the_corpus_is_the_documented_24_files(self):
+        self.assertEqual(len(corpus_files()), 24)
+
+    @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")
+    def test_read_results_are_byte_identical(self):
+        self.assertEqual(self.changed("Read"), [])
+
+    @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")
+    @unittest.expectedFailure
+    def test_grep_results_are_byte_identical(self):
+        # Known failure: only Read is exempted from masking, so a Grep hit inside a code file is
+        # masked and Claude quotes the placeholder back in its Edit. Fixed by pii-guardian-qdu.4.
+        self.assertEqual(self.changed("Grep"), [])
+
+    @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")
+    @unittest.expectedFailure
+    def test_bash_results_are_byte_identical(self):
+        # Known failure: a Bash result carries no file path, so it cannot be told from a data dump.
+        # The decision on it is pii-guardian-qdu.4's to record.
+        self.assertEqual(self.changed("Bash"), [])
 
 
 class CacheTest(unittest.TestCase):

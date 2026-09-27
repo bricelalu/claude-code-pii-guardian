@@ -84,12 +84,33 @@ All in [`guardrail/`](../guardrail/). The live checks need `task up` and a RunPo
 
 | Check | What it proves | Result |
 |---|---|---|
-| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 27/27 (25 + 2 skipped without `pygments`) |
+| `test_code_guard.py` (offline) | Masking rules, request scope, JSON decoding, code-file detection, cache | 31/31 (2 expected failures, see below; 25 + 5 skipped without `pygments`) |
 | `scope_check.py` (live) | Which blocks of a real `/v1/messages` request are scanned: a test card number in one block at a time must block the request only when that block is scanned | 8/8 |
 | `regex_sweep.py` (offline) | Regex false positives on real code | 14,594 files (240 MB, the LiteLLM image's site-packages): 5,152 matches before fencing, 2,227 after, mostly real emails/IPs in package metadata and docs |
 | `replay_sessions.py` (local only) | Regexes on your own `~/.claude/projects` transcripts | 26 sessions, 914 distinct scanned blocks (1.2 MB), 63 would change; found the infrastructure-IP issue. Report in `.pii-score-out/` (gitignored) |
 | `claude_ab.py` (live) | Can Claude Code still do its job through the gateway? | See below |
 | `task pii-score`, `task pii-bench-gateway` (live) | Masking ratio and false positives on exports and generated code | See the [README](../README.md#pii-detection-scoring-task-pii-score) |
+
+#### The 24-file corpus, through the request path
+
+`docs/ner-model-benchmark.md` reports 0 code tokens masked over `bench/corpus`, but it measures
+those files as raw text through `/guardrails/apply_guardrail`, which never reaches the scope
+decision. `CodeCorpusRequestTest` measures the same 24 files the way a developer meets them: each
+one echoed back inside a `tool_result`, once per tool that returns one, through `mask_request` —
+the path `/v1/messages` takes.
+
+| Tool that echoes the file | Files changed by masking |
+|---|---|
+| `Read` | 0/24 |
+| `Grep` | 24/24 |
+| `Bash` | 24/24 |
+
+Only `Read` is exempted from masking, so the same line comes back with `<[EMAIL_REDACTED]>` in it
+when `Grep` or `Bash` found it — the failed-`Edit` mode described above. The two are expected
+failures in the offline suite and are the specification of `pii-guardian-qdu.4`: the `Read` row has
+to match the other two. Offline, the figures come from the real regexes against the fake analyzer,
+and every corpus file carries a real email, so the gap between the rows is the exemption and not
+the analyzer. With the live model the names and cities go too, so re-measure after a fix.
 
 ### Claude Code A/B (`claude_ab.py`)
 
