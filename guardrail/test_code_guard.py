@@ -250,6 +250,48 @@ class MaskRequestTest(unittest.TestCase):
         self.assertEqual(len(self.calls), before)
 
 
+def mask_result(tool, tool_input, content):
+    """Mask one real request whose tool_result is `content`, and return what came back."""
+    masker, _ = make_masker()
+    data = {"messages": [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": tool, "input": tool_input}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": content}]},
+    ]}
+    asyncio.run(masker.mask_request(data))
+    return data["messages"][1]["content"][0]["content"]
+
+
+class GrepGlobNotebookTest(unittest.TestCase):
+    """pii-guardian-qdu.4: the code-file exemption applies per line, not just to Read."""
+
+    @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")
+    def test_grep_mixes_code_and_data_lines_in_one_result(self):
+        content = ("src/crm.py:5:AUTHOR = 'Jean Dupont'  # Lyon\n"
+                   "data/customers.csv:2:Jean Dupont,jean@acme.fr")
+        self.assertEqual(
+            mask_result("Grep", {"pattern": "Jean", "path": "src", "output_mode": "content"}, content),
+            "src/crm.py:5:AUTHOR = 'Jean Dupont'  # Lyon\n"
+            "data/customers.csv:2:<PERSON>,[EMAIL_REDACTED]")
+
+    def test_grep_hit_in_a_data_file_stays_masked(self):
+        # Leak guard: a known data extension and an unrecognized one both still get masked, with
+        # or without pygments installed.
+        for path in ("data/customers.csv", "data/customers"):
+            with self.subTest(path=path):
+                content = f"{path}:2:Jean Dupont,jean@acme.fr"
+                self.assertEqual(mask_result("Grep", {"pattern": "Jean", "path": "data"}, content),
+                                 f"{path}:2:<PERSON>,[EMAIL_REDACTED]")
+
+    def test_glob_result_is_paths_only_and_stays_untouched(self):
+        content = "/src/crm/customers.py\n/exports/customers.csv\n/Users/jean.dupont/project/notes.md"
+        self.assertEqual(mask_result("Glob", {"pattern": "**/*"}, content), content)
+
+    def test_notebookread_of_ipynb_is_untouched(self):
+        content = "Cell 1: Customer name Jean Dupont, contact jean@acme.fr"
+        self.assertEqual(
+            mask_result("NotebookRead", {"notebook_path": "/nb/analysis.ipynb"}, content), content)
+
+
 @functools.lru_cache(maxsize=1)
 def corpus_files():
     """The 24 bench corpus files (6 templates x 4 natural languages) as {name: text}.
@@ -270,14 +312,20 @@ def corpus_files():
     return files
 
 
+def grep_format(name, text):
+    """A realistic Grep content-mode result for one file: one "path:line:text" line per source
+    line, the shape guardrail/code_guard.py's per-line attribution reads."""
+    return "\n".join(f"{name}:{i}:{line}" for i, line in enumerate(text.split("\n"), 1))
+
+
 class CodeCorpusRequestTest(unittest.TestCase):
     """Ask 50 ("never mask any code symbols that could break Claude Code"), measured through
     mask_request, the path a /v1/messages request takes.
 
     docs/ner-model-benchmark.md reports 0 code tokens masked over these 24 files, but it measures
     them as raw text through /guardrails/apply_guardrail, which never reaches the scope decision.
-    Here every file is echoed back inside a tool_result, once per tool that returns one, which is
-    how a developer actually meets it.
+    Here every file is echoed back inside a tool_result, once per tool that returns one (Grep as
+    "path:line:text", the shape it actually returns), which is how a developer actually meets it.
     """
 
     def setUp(self):
@@ -285,6 +333,7 @@ class CodeCorpusRequestTest(unittest.TestCase):
 
     def echoed_by(self, tool, name, text):
         """Mask one real request whose tool_result echoes the file, and return what came back."""
+        content = grep_format(name, text) if tool == "Grep" else text
         inputs = {
             "Read": {"file_path": f"/src/{name}"},
             "Grep": {"pattern": "Maintainer", "path": "/src", "output_mode": "content"},
@@ -294,15 +343,19 @@ class CodeCorpusRequestTest(unittest.TestCase):
             {"role": "assistant", "content": [
                 {"type": "tool_use", "id": "t1", "name": tool, "input": inputs[tool]}]},
             {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": text}]},
+                {"type": "tool_result", "tool_use_id": "t1", "content": content}]},
         ]}
         asyncio.run(self.masker.mask_request(data))
         return data["messages"][1]["content"][0]["content"]
 
     def changed(self, tool):
         """Which files the tool echoed back altered. Every file is exercised, whatever the verdict."""
-        return [name for name, text in corpus_files().items()
-                if self.echoed_by(tool, name, text) != text]
+        changed = []
+        for name, text in corpus_files().items():
+            expected = grep_format(name, text) if tool == "Grep" else text
+            if self.echoed_by(tool, name, text) != expected:
+                changed.append(name)
+        return changed
 
     def test_the_corpus_is_the_documented_24_files(self):
         self.assertEqual(len(corpus_files()), 24)
@@ -312,10 +365,9 @@ class CodeCorpusRequestTest(unittest.TestCase):
         self.assertEqual(self.changed("Read"), [])
 
     @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")
-    @unittest.expectedFailure
     def test_grep_results_are_byte_identical(self):
-        # Known failure: only Read is exempted from masking, so a Grep hit inside a code file is
-        # masked and Claude quotes the placeholder back in its Edit. Fixed by pii-guardian-qdu.4.
+        # Fixed by pii-guardian-qdu.4: each "path:line:text" line is attributed to its own file,
+        # so a code-file hit is restored to its original bytes like Read of that file would be.
         self.assertEqual(self.changed("Grep"), [])
 
     @unittest.skipUnless(HAS_PYGMENTS, "is_code_file needs pygments (it is in the LiteLLM image)")

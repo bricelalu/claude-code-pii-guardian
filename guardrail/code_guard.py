@@ -2,11 +2,12 @@
 results, and nothing else.
 
 Scope (Anthropic /v1/messages shape):
-  masked    user text blocks, tool_result content (string or text blocks): MCP tools, Bash, Grep,
-            Read of data files (csv, json, md...)
+  masked    user text blocks, tool_result content (string or text blocks): MCP tools, Bash,
+            Read of data files (csv, json, md...), Grep/Glob lines attributed to a data file
   untouched system prompt, assistant text, tool_use input, results of the `skip_tools` tools
-            (Write/Edit: their result echoes the file Claude is editing), Read of code files
-            (Claude must quote them exactly to edit them), paths and URLs
+            (Write/Edit: their result echoes the file Claude is editing), Read of code files and
+            of notebooks (.ipynb) (Claude must quote them exactly to edit them), Grep/Glob lines
+            attributed to a code file, paths and URLs
 JSON tool results (MCP): strings holding escaped documents (a table or CSV in a "content" field,
 JSON inside JSON) are decoded and masked as documents of their own, then re-serialized.
 
@@ -122,9 +123,30 @@ def _has_lexer(filename):
 
 def is_code_file(path, data_extensions):
     """Code or config a developer edits: pygments knows its language and it isn't a data format.
-    Unknown files (no extension, .env, .ipynb...) count as data."""
+    A notebook (.ipynb) counts as code even though pygments has no lexer for it: NotebookEdit is
+    in skip_tools, so the file is meant to be edited, and a masked NotebookRead fails that edit.
+    Any other unknown file (no extension, .env...) counts as data."""
     name = re.split(r"[\\/]", path)[-1]
-    return bool(name) and os.path.splitext(name)[1].lower() not in data_extensions and _has_lexer(name)
+    if not name:
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    if ext in data_extensions:
+        return False
+    return ext == ".ipynb" or _has_lexer(name)
+
+
+# Grep/Glob mix hits from many files in one result: "path:line:text" (content mode, line numbers
+# on), "path:text" (content mode, line numbers off) or a bare path (files_with_matches, Glob).
+_LINE_PATH = re.compile(r'^([^\n]+?):(?:\d+:)?')
+
+
+def _line_path(line):
+    """The file path a Grep/Glob output line is about, or None when its shape doesn't say (the
+    line then stays masked, the fail-safe default)."""
+    m = _LINE_PATH.match(line)
+    if m:
+        return m.group(1)
+    return line if line and "\n" not in line else None
 
 
 ESCAPED = re.compile(r'[\n\r\t"\\]')  # a JSON string holding one of these is serialized escaped
@@ -235,7 +257,8 @@ class Masker:
         return out
 
     def _targets(self, messages):
-        """(container, key) of every string to mask, in request order."""
+        """(container, key, tool_use) of every string to mask, in request order. tool_use is the
+        tool_use block that produced a tool_result, None for user text."""
         tools = {b.get("id"): b
                  for m in messages if m.get("role") == "assistant" and isinstance(m.get("content"), list)
                  for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
@@ -245,34 +268,63 @@ class Masker:
             if m.get("role") != "user":
                 continue
             if isinstance(content, str):
-                targets.append((m, "content"))
+                targets.append((m, "content", None))
                 continue
             for b in content if isinstance(content, list) else []:
                 if not isinstance(b, dict):
                     continue
                 if b.get("type") == "text":
-                    targets.append((b, "text"))
-                elif b.get("type") == "tool_result" and not self._unmasked_tool(tools.get(b.get("tool_use_id"), {})):
+                    targets.append((b, "text", None))
+                elif b.get("type") == "tool_result":
+                    tool_use = tools.get(b.get("tool_use_id"), {})
+                    if self._unmasked_tool(tool_use):
+                        continue
                     inner = b.get("content")
                     if isinstance(inner, str):
-                        targets.append((b, "content"))
+                        targets.append((b, "content", tool_use))
                     elif isinstance(inner, list):
-                        targets += [(x, "text") for x in inner if isinstance(x, dict) and x.get("type") == "text"]
-        return [(c, k) for c, k in targets if isinstance(c.get(k), str)]
+                        targets += [(x, "text", tool_use) for x in inner
+                                    if isinstance(x, dict) and x.get("type") == "text"]
+        return [(c, k, t) for c, k, t in targets if isinstance(c.get(k), str)]
 
     def _unmasked_tool(self, tool_use):
         name = tool_use.get("name")
-        path = (tool_use.get("input") or {}).get("file_path")
-        return name in self.skip_tools or (
-            name == "Read" and isinstance(path, str) and is_code_file(path, self.data_extensions))
+        if name in self.skip_tools:
+            return True
+        # NotebookRead takes "notebook_path", not Read's "file_path"; is_code_file always says a
+        # .ipynb is code, so this exempts it the same way Read of one now does. Neither key present
+        # (or the wrong tool) leaves path None, which fails isinstance below: stays masked.
+        input_ = tool_use.get("input") or {}
+        path = input_.get("notebook_path") or input_.get("file_path")
+        return name in ("Read", "NotebookRead") and isinstance(path, str) and is_code_file(path, self.data_extensions)
+
+    def _restore_code_lines(self, original, masked, tool_use):
+        """Grep/Glob results mix hits from many files in one string: a line attributed to a code
+        file goes back to its original bytes, the same exemption Read gets for that file. A line
+        whose shape doesn't name a file, or a tool other than Grep/Glob, keeps the masked text."""
+        if (tool_use or {}).get("name") not in ("Grep", "Glob"):
+            return masked
+        if json_document(original) is not None:  # mask_texts re-serializes it: lines don't line up
+            return masked
+        orig_lines = original.split("\n")
+        masked_lines = masked.split("\n")
+        if len(orig_lines) != len(masked_lines):  # a label held a literal "\n": stay fail-safe
+            return masked
+        out = []
+        for o, m in zip(orig_lines, masked_lines):
+            path = _line_path(o)
+            out.append(o if path and is_code_file(path, self.data_extensions) else m)
+        return "\n".join(out)
 
     async def mask_request(self, data):
         messages = data.get("messages")
         if not isinstance(messages, list):
             return
         targets = self._targets(messages)
-        for (container, key), masked in zip(targets, await self.mask_texts([c[k] for c, k in targets])):
-            container[key] = masked
+        originals = [c[k] for c, k, _ in targets]
+        for (container, key, tool_use), original, masked in zip(
+                targets, originals, await self.mask_texts(originals)):
+            container[key] = self._restore_code_lines(original, masked, tool_use)
 
 
 class CodeGuard(CustomGuardrail):
