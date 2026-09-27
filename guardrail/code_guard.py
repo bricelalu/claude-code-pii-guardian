@@ -203,14 +203,18 @@ class Masker:
 
     async def _decode_json(self, text):
         """Mask escaped documents inside a JSON text (MCP: a table in a "content" field), and undo
-        \\u escapes so NER sees "Lucía", not "Luc\\u00eda". Unescaped JSON keeps its exact bytes."""
+        \\u escapes so NER sees "Lucía", not "Luc\\u00eda". Return original text if nothing was masked."""
         data = json_document(text)
         if data is None:
             return text
         nested = list(dict.fromkeys(s for s in json_strings(data) if ESCAPED.search(s)))
         if not nested and "\\u" not in text:
             return text
-        data = replace_strings(data, dict(zip(nested, await self.mask_texts(nested))))
+        masked = await self.mask_texts(nested)
+        # If nothing changed and no unicode escapes, return original to preserve exact bytes (1.10 stays 1.10, not 1.1)
+        if masked == nested and "\\u" not in text:
+            return text
+        data = replace_strings(data, dict(zip(nested, masked)))
         if "\n" in text.strip():
             return json.dumps(data, ensure_ascii=False, indent=2)
         return json.dumps(data, ensure_ascii=False, separators=(",", ":"))

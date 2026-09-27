@@ -150,6 +150,23 @@ class MaskTextTest(unittest.TestCase):
         self.assertEqual(mask_text('[{"id":1,"name":"Jean Dupont","city":"Lyon"}]'),
                          '[{"id":1,"name":"<PERSON>","city":"<LOCATION>"}]')
 
+    def test_json_with_escaped_strings_but_no_pii_stays_byte_identical(self):
+        # Issue: JSON with escaped newlines/tabs but no PII was re-serialized, normalizing numbers
+        # Example 1: JSON with escaped newline in nested string, non-canonical number format
+        json_str = '{"data":"line\\nbreak","value":1.10}'
+        result = mask_text(json_str)
+        self.assertEqual(result, json_str)
+
+        # Example 2: JSON with escaped newline in content (like MCP table results), no PII
+        json_str = json.dumps({"content": "name | value\n---|---\ntest | 1e5"})
+        result = mask_text(json_str)
+        self.assertEqual(result, json_str)
+
+        # Example 3: Minified JSON (no newlines in the JSON structure itself, but escaped \n in strings)
+        json_str = '{"data":"a\\nb","other":"c\\td"}'
+        result = mask_text(json_str)
+        self.assertEqual(result, json_str)
+
     @unittest.skipUnless(HAS_PYGMENTS, "pygments not installed (it is in the LiteLLM image)")
     def test_code_files_are_told_apart_from_data_files(self):
         for path in ("/a/b.py", "Dockerfile", "infra/main.tf", r"C:\src\App.java", "web/app.tsx", "k8s/deploy.yaml"):
