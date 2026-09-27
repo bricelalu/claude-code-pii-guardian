@@ -6,7 +6,9 @@ Scope (Anthropic /v1/messages shape):
             Read of data files (csv, json, md...)
   untouched system prompt, assistant text, tool_use input, results of the `skip_tools` tools
             (Write/Edit: their result echoes the file Claude is editing), Read of code files
-            (Claude must quote them exactly to edit them), paths and URLs
+            (Claude must quote them exactly to edit them), Read of a path a Write/Edit/MultiEdit/
+            NotebookEdit targets anywhere in the same request (it's being edited right now,
+            whatever its extension), paths and URLs
 JSON tool results (MCP): strings holding escaped documents (a table or CSV in a "content" field,
 JSON inside JSON) are decoded and masked as documents of their own, then re-serialized.
 
@@ -239,6 +241,12 @@ class Masker:
         tools = {b.get("id"): b
                  for m in messages if m.get("role") == "assistant" and isinstance(m.get("content"), list)
                  for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"}
+        # A path a Write/Edit/MultiEdit/NotebookEdit targets anywhere in this request is being
+        # edited right now: its Read is code whatever the extension says (pii-guardian-qdu.5).
+        # Exact file_path/notebook_path string match only, never basename.
+        edited_paths = {p for b in tools.values() if b.get("name") in self.skip_tools
+                        for p in [(b.get("input") or {}).get("file_path")
+                                  or (b.get("input") or {}).get("notebook_path")] if isinstance(p, str)}
         targets = []
         for m in messages:
             content = m.get("content")
@@ -252,7 +260,8 @@ class Masker:
                     continue
                 if b.get("type") == "text":
                     targets.append((b, "text"))
-                elif b.get("type") == "tool_result" and not self._unmasked_tool(tools.get(b.get("tool_use_id"), {})):
+                elif b.get("type") == "tool_result" and not self._unmasked_tool(
+                        tools.get(b.get("tool_use_id"), {}), edited_paths):
                     inner = b.get("content")
                     if isinstance(inner, str):
                         targets.append((b, "content"))
@@ -260,11 +269,12 @@ class Masker:
                         targets += [(x, "text") for x in inner if isinstance(x, dict) and x.get("type") == "text"]
         return [(c, k) for c, k in targets if isinstance(c.get(k), str)]
 
-    def _unmasked_tool(self, tool_use):
+    def _unmasked_tool(self, tool_use, edited_paths):
         name = tool_use.get("name")
         path = (tool_use.get("input") or {}).get("file_path")
         return name in self.skip_tools or (
-            name == "Read" and isinstance(path, str) and is_code_file(path, self.data_extensions))
+            name == "Read" and isinstance(path, str)
+            and (path in edited_paths or is_code_file(path, self.data_extensions)))
 
     async def mask_request(self, data):
         messages = data.get("messages")
