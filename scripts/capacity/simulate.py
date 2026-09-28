@@ -68,10 +68,36 @@ GPUS = {
 }
 EKS_HOURLY_USD = 0.10
 
-# ESTIMATED, unmeasured (the issue: "assume ~2x, unmeasured"). Kept as a global so a sensitivity
-# sweep (see docs/capacity-simulation.md) can override it via --fp16-speedup without threading an
-# extra parameter through every call site.
-FP16_SPEEDUP = 2.0
+# MEASURED 2026-09-28 on a rented RunPod RTX 4090 pod (Ada Lovelace -- the closest architecture
+# generation to the L4/L40S options above; A10G/T4 are older Ampere/Turing), running our exact
+# analyzer image's extract_entities_long(quantize=True) vs quantize=False, same 2/10/40 KB
+# snippet as the original benchmark (docs/ner-model-benchmark.md). Two runs, averaged:
+#   2 KB: fp32 0.115s / fp16 0.023s = 5.00x   10 KB: 0.203s / 0.080s = 2.54x
+#   40 KB: 0.561s / 0.506s = 1.11x
+# The speedup is NOT flat: fp16 mainly cuts the small-batch fixed overhead, which is a shrinking
+# share of the time as the request (and its internal chunk count) grows. Not the exact target
+# GPU (RTX 4090, not L4/L40S) and not the production model's real traffic shape -- see
+# docs/capacity-simulation.md "Real-hardware validation" for the caveats.
+FP16_SPEEDUP_MEASURED_KB = {2.0: 5.00, 10.0: 2.54, 40.0: 1.11}
+
+# None = use the measured curve above. --fp16-speedup sets this to a flat override, for the
+# sensitivity sweep this replaced (docs/capacity-simulation.md keeps that table for reference).
+FP16_SPEEDUP_OVERRIDE = None
+
+
+def fp16_speedup_at(kb):
+    """Piecewise-linear interpolation of FP16_SPEEDUP_MEASURED_KB, clamped flat outside the
+    measured 2-40 KB range (no data beyond it, so no extrapolated slope either)."""
+    if FP16_SPEEDUP_OVERRIDE is not None:
+        return FP16_SPEEDUP_OVERRIDE
+    points = sorted(FP16_SPEEDUP_MEASURED_KB.items())
+    if kb <= points[0][0]:
+        return points[0][1]
+    if kb >= points[-1][0]:
+        return points[-1][1]
+    for (k0, s0), (k1, s1) in zip(points, points[1:]):
+        if k0 <= kb <= k1:
+            return s0 + (kb - k0) / (k1 - k0) * (s1 - s0)
 
 # ESTIMATED: no production traffic exists yet (pre-launch simulation). A plausible office-hours
 # shape -- ramps up, dips at lunch, tapers off -- as a fraction of the 10 req/s peak. State of
@@ -113,14 +139,13 @@ def combine_seed(*parts):
     return zlib.crc32(repr(parts).encode())
 
 
-def per_kb_time(gpu_key, precision):
-    """Seconds of GPU inference time per KB, scaled from the measured RTX A4500 baseline by the
-    spec-sheet FP32 ratio, then halved for the 16-bit variant (the issue: "assume ~2x,
-    unmeasured" -- a flat multiplier, not derived from spec-sheet FP16 tensor-core ratios, since
-    those reflect matmul-specific gains that don't map to a whole model's wall-clock speedup)."""
+def per_kb_time(gpu_key, precision, kb):
+    """Seconds-per-KB of GPU inference time at this request size, scaled from the measured RTX
+    A4500 fp32 baseline by the spec-sheet FP32 ratio, then divided by the measured, size-dependent
+    fp16 speedup (fp16_speedup_at) for the 16-bit variant."""
     fp32 = GPUS[gpu_key]["fp32_tflops"]
     t = BASELINE_S_PER_KB_FP32 * (BASELINE_GPU_FP32_TFLOPS / fp32)
-    return t / FP16_SPEEDUP if precision == "fp16" else t
+    return t / fp16_speedup_at(kb) if precision == "fp16" else t
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +199,15 @@ def run_scenario(gpu_key, precision, rate, servers, sim_seconds, warmup, seed,
     decisions on exactly that number."""
     duration = max(sim_seconds, min_samples / rate)
     rng = random.Random(seed)
-    kb_time = per_kb_time(gpu_key, precision)
+
+    def service_time():
+        kb = draw_size_kb(rng, mean_kb, sigma)
+        return kb * per_kb_time(gpu_key, precision, kb)
+
     samples = simulate_queue(
         rng,
         arrival_gap=lambda: rng.expovariate(rate),
-        service_time=lambda: draw_size_kb(rng, mean_kb, sigma) * kb_time,
+        service_time=service_time,
         servers=servers, duration=duration, warmup=warmup,
     )
     totals = sorted(network_rtt + w + s for w, s in samples)
@@ -200,7 +229,7 @@ def min_replicas(gpu_key, precision, rate, floor, sim_seconds, warmup, seed,
     structurally unreachable on this GPU/precision -- skip the search instead of simulating up
     to `cap` replicas for nothing (this is exactly the AWS T4 case: its GLiNER2 inference is
     too slow at any replica count)."""
-    if network_rtt + mean_kb * per_kb_time(gpu_key, precision) > target_avg:
+    if network_rtt + mean_kb * per_kb_time(gpu_key, precision, mean_kb) > target_avg:
         return None, None
     c = floor
     while c <= cap:
@@ -250,6 +279,16 @@ def selfcheck(seed=42, verbose=True):
               f"{'PASS' if passed_det else 'FAIL'} ({len(det)} samples, "
               f"max wait {max((w for w, _ in det), default=0):.6f}s)", file=sys.stderr)
 
+    # fp16_speedup_at: exact at the 3 measured points, clamped flat outside [2, 40] KB.
+    exact = all(fp16_speedup_at(kb) == ratio for kb, ratio in FP16_SPEEDUP_MEASURED_KB.items())
+    clamped = fp16_speedup_at(0.5) == 5.00 and fp16_speedup_at(100) == 1.11
+    midpoint = abs(fp16_speedup_at(6.0) - (5.00 + 2.54) / 2) < 1e-9  # linear midpoint of 2-10 KB
+    passed_curve = exact and clamped and midpoint
+    ok &= passed_curve
+    if verbose:
+        print(f"  fp16_speedup_at (measured curve): exact-points={exact} clamped={clamped} "
+              f"midpoint={midpoint} -> {'PASS' if passed_curve else 'FAIL'}", file=sys.stderr)
+
     return ok
 
 
@@ -269,7 +308,7 @@ def daily_shapes():
 def structural_floor_s(gpu_key, precision, mean_kb=MEAN_REQUEST_KB, network_rtt=NETWORK_RTT_S):
     """Best-case average latency (network + mean inference time, zero queueing) -- the floor no
     replica count can beat. If this alone exceeds the target, the option is infeasible."""
-    return network_rtt + mean_kb * per_kb_time(gpu_key, precision)
+    return network_rtt + mean_kb * per_kb_time(gpu_key, precision, mean_kb)
 
 
 def build_report(sim_seconds, warmup, seed, target_avg=TARGET_AVG_S,
@@ -301,6 +340,14 @@ def build_report(sim_seconds, warmup, seed, target_avg=TARGET_AVG_S,
                 c2, stats2 = by_shape[(OFF_HOURS_MULTIPLIER, 1)]
                 by_hour[(False, h)] = (c2, stats2)
                 weekend_replica_sum += c2 or 0
+            if weekday_replica_sum == 0 and weekend_replica_sum == 0:
+                # min_replicas returned None (target unreachable within `cap` replicas) for every
+                # single hour -- distinct from the mean-only floor_s check above, which passed (it
+                # ignores p95 and queueing). Without this, monthly_hours would be 0 and the report
+                # would print a misleading EKS-only "cost" for an option that serves no traffic.
+                report[gpu_key][precision] = dict(infeasible=True, floor_s=floor_s,
+                                                   reason="p95 target unreachable at every hour, even at the replica cap")
+                continue
             monthly_hours = weekday_replica_sum * WEEKDAY_DAYS_PER_MONTH + weekend_replica_sum * WEEKEND_DAYS_PER_MONTH
             gpu = GPUS[gpu_key]
             cost_local = monthly_hours * gpu["price"]
@@ -332,6 +379,11 @@ def render_report(report):
         f"Target: avg <= {TARGET_AVG_S*1000:.0f} ms, p95 <= {TARGET_P95_S*1000:.0f} ms per analyzer call. "
         f"Peak {PEAK_RATE_RPS:.0f} req/s, mean {MEAN_REQUEST_KB:.0f} KB/request (lognormal, sigma={SIGMA_KB}).",
         "",
+        f"fp16 speedup: measured on an RTX 4090 (not the exact target GPU), size-dependent -- "
+        f"{', '.join(f'{kb:.0f} KB={r:.2f}x' for kb, r in sorted(FP16_SPEEDUP_MEASURED_KB.items()))}, "
+        f"interpolated between points and clamped flat outside them. "
+        f"{'Overridden flat at ' + format(FP16_SPEEDUP_OVERRIDE, '.2f') + 'x for this run.' if FP16_SPEEDUP_OVERRIDE is not None else ''}",
+        "",
     ]
     for gpu_key, gpu in GPUS.items():
         for precision in ("fp32", "fp16"):
@@ -344,10 +396,16 @@ def render_report(report):
                           "the decided floor of >= 2 replicas in different zones during working "
                           "hours. Listed for latency/cost comparison only.**", ""]
             if r["infeasible"]:
-                lines += [f"**Structurally infeasible at any replica count.** Network + mean "
-                          f"inference time alone = {r['floor_s']*1000:.0f} ms, already above the "
-                          f"{TARGET_AVG_S*1000:.0f} ms average target; adding replicas only "
-                          f"reduces queueing wait, not inference time.", ""]
+                if r.get("reason"):
+                    lines += [f"**Infeasible: {r['reason']}.** Network + mean inference time alone "
+                              f"= {r['floor_s']*1000:.0f} ms (under the {TARGET_AVG_S*1000:.0f} ms "
+                              f"average target), but the p95 tail (large requests) can't be brought "
+                              f"under {TARGET_P95_S*1000:.0f} ms even at the replica search cap.", ""]
+                else:
+                    lines += [f"**Structurally infeasible at any replica count.** Network + mean "
+                              f"inference time alone = {r['floor_s']*1000:.0f} ms, already above the "
+                              f"{TARGET_AVG_S*1000:.0f} ms average target; adding replicas only "
+                              f"reduces queueing wait, not inference time.", ""]
                 continue
             lines += ["| Hour | Weekday replicas | Weekday avg/p95 | Weekend replicas | Weekend avg/p95 |",
                       "|---|---|---|---|---|"]
@@ -391,7 +449,7 @@ def render_report(report):
 # ---------------------------------------------------------------------------
 
 def main():
-    global FP16_SPEEDUP
+    global FP16_SPEEDUP_OVERRIDE
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selfcheck", action="store_true", help="only run the self-check, then exit")
     ap.add_argument("--gpu", choices=sorted(GPUS), help="ad-hoc mode: one GPU option")
@@ -405,12 +463,12 @@ def main():
     ap.add_argument("--sigma", type=float, default=SIGMA_KB)
     ap.add_argument("--min-samples", type=int, default=3000,
                     help="stretch simulated duration so low-rate hours still collect this many samples")
-    ap.add_argument("--fp16-speedup", type=float, default=FP16_SPEEDUP,
-                    help="unmeasured 16-bit speedup multiplier (issue: 'assume ~2x, unmeasured'); "
-                         "override for a sensitivity check")
+    ap.add_argument("--fp16-speedup", type=float, default=None,
+                    help="flat 16-bit speedup multiplier, overriding the measured size-dependent "
+                         "curve (FP16_SPEEDUP_MEASURED_KB) everywhere; for a sensitivity check")
     ap.add_argument("--out", help="write the report to this file instead of stdout")
     args = ap.parse_args()
-    FP16_SPEEDUP = args.fp16_speedup
+    FP16_SPEEDUP_OVERRIDE = args.fp16_speedup
 
     ok = selfcheck(seed=args.seed)
     if not ok:

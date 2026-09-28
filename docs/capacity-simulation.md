@@ -9,35 +9,39 @@
 replicas most hours, up to 3 at peak, floor of 2 replicas 7:00-20:00 weekdays enforced by the
 availability requirement).
 
-**This number rests entirely on an assumption the issue itself flags as unmeasured: the 16-bit
-model runs ~2x faster than the measured 32-bit baseline.** Nothing here has run the 16-bit model
-on real hardware. A sensitivity sweep (same simulation, `--fp16-speedup`) shows the break-even
-point:
+**Updated 2026-09-28: this number is now backed by a real-hardware measurement, and it is
+unchanged.** The 16-bit speedup was measured (Section 7) on a rented GPU instead of assumed, and
+it turned out **not to be flat**: about 5x on a small request, 2.5x at 10 KB, only 1.1x at 40 KB
+(fp16 mainly cuts small-batch fixed overhead, a shrinking share of the time as a request grows).
+The simulation now uses that real, size-dependent curve. Result: **every Scaleway row's cost is
+byte-for-byte identical to the old flat-2x run.** The winning option was never actually
+speed-bound -- it was bound by the decided ">= 2 replicas in different zones" availability floor,
+so a faster or slower 16-bit model changes nothing as long as it clears that floor's own
+capacity easily, which both the assumed 2x and the measured curve do. The only rows that moved are
+non-winning ones (AWS A10G fp16 improved slightly; AWS T4 fp16's already-infeasible verdict got a
+corrected reason -- see Section 7). The break-even sensitivity table below is now historical: it
+answers "what if the real speedup had been worse than assumed", which the measurement closes.
 
-| Assumed 16-bit speedup | Scaleway L4 monthly cost | Fits EUR 1,000? |
+| Assumed 16-bit speedup (historical sensitivity, superseded by the Section 7 measurement) | Scaleway L4 monthly cost | Fits EUR 1,000? |
 |---|---|---|
 | 1.25x | 1,127 EUR | No |
 | 1.5x | 1,043 EUR | No (over by ~4%) |
 | 1.6x | 975 EUR | Yes |
 | 1.7x | 907 EUR | Yes |
-| 2.0x (assumed) | 857 EUR | Yes |
+| 2.0x (old flat assumption) | 857 EUR | Yes |
+| **Measured curve (now default)** | **857 EUR** | **Yes -- unchanged from 2.0x, see above** |
 
-Break-even lies between 1.5x (over budget) and 1.6x (975 EUR, under budget) -- 1.6x is the lowest
-sampled value that fits, not a computed threshold; the true break-even is somewhere in that
-0.1x-wide bracket. **The real 16-bit speedup needs to be at least there for this option to fit the
-budget.** Below
-that, the cheapest *known-safe* option is Scaleway L4 32-bit at **EUR 2,204/month** (2,790
-GPU-hours) -- **2.2x the budget** -- which itself has almost no margin: modeled average latency
-at 32-bit is 284-299 ms against the 300 ms target (structural floor 297.7 ms: network + mean
-inference time alone, before any queueing), so a ~1% error in the measured 0.075 s/KB baseline,
-in the FP32-TFLOPS scaling, or in the assumed request size can flip it from compliant to
-impossible at any replica count. **The real-hardware validation plan below (Section 7) exists
-specifically to resolve this before anything is provisioned for real.**
+For comparison, the cheapest *known-safe fp32* option (no precision assumption at all) is
+Scaleway L4 32-bit at **EUR 2,204/month** (2,790 GPU-hours) -- **2.2x the budget** -- which itself
+has almost no margin: modeled average latency at 32-bit is 284-299 ms against the 300 ms target
+(structural floor 297.7 ms: network + mean inference time alone, before any queueing), so a ~1%
+error in the measured 0.075 s/KB baseline, in the FP32-TFLOPS scaling, or in the assumed request
+size can flip it from compliant to impossible at any replica count.
 
-If the 16-bit number does not hold up: the gap to budget is roughly EUR 100-1,200/month
-depending on which GPU survives validation (see the full table). Closing it would mean either
-accepting a higher budget, a faster 16-bit speedup arriving from a real benchmark, or dropping
-part of the ">= 2 replicas in different zones during working hours" floor -- which is a decided
+Since the winning option's cost didn't move, there is no budget gap to close from this exercise.
+The remaining unmeasured piece is the FP32-TFLOPS cross-GPU scaling (Section 3): the 4090
+benchmark validates the *fp16-vs-fp32 ratio*, not the *A4500-vs-L4 absolute speed* the whole
+report is scaled from.
 input, not something this report can override.
 
 ## 1. What this answers, and what it doesn't
@@ -88,7 +92,7 @@ arguments) reproduces every table below and runs in under 5 seconds.
 | Daily traffic **profile** (hour-by-hour multiplier of the 10 req/s peak) | see table below | **Estimated** | No production traffic exists yet (pre-launch); a plausible office-hours ramp/lunch-dip/taper shape, stated explicitly so it can be replaced by real logs later |
 | Baseline: 0.075 s/KB GLiNER2 inference, RTX A4500, 32-bit | measured | **Measured** | pii-guardian-0p2 (maintainer's own benchmark) |
 | GPU speed scaling: linear in spec-sheet FP32 TFLOPS | -- | **Estimated** | Ignores memory-bandwidth and batch-size-1 effects; a linear-TFLOPS proxy, not a measured cross-GPU benchmark |
-| 16-bit speedup: 2x flat multiplier on the 32-bit time | -- | **Estimated, explicitly unmeasured** | pii-guardian-0p2 / -rjb: "assume ~2x, unmeasured." Not derived from spec-sheet FP16 Tensor Core ratios (those reflect matmul-specific gains that don't map to a whole model's wall-clock speedup) |
+| 16-bit speedup: size-dependent curve (5.0x at 2 KB, 2.5x at 10 KB, 1.1x at 40 KB; interpolated, clamped outside that range) | -- | **Measured** (2026-09-28) | Section 7: RunPod RTX 4090 pod, our exact analyzer image, `extract_entities_long(quantize=True/False)`, 2 runs averaged. Not the exact target GPU (4090 is Ada Lovelace, same generation as L4/L40S; none were in RunPod stock at the time) |
 | In-region network RTT: 5 ms | -- | **Estimated** | The issue states only that in-region RTT "drops to a few ms"; no measured number exists for a same-region deployment |
 | Gateway overhead per analyzer call: ~90-110 ms | measured (tiny-text case) | **Measured** | `docs/claude-code-guardrail.md` Latency table: 0.30 s direct vs 0.39-0.41 s through gateway |
 | GPU prices (on-demand) | listed below | **Decided/measured** | pii-guardian-0p2: scaleway.com/en/pricing/gpu; AWS Price List API, 2026-09-25 |
@@ -151,7 +155,7 @@ Target: avg <= 300 ms, p95 <= 1,000 ms. Peak 10 req/s, mean 5 KB/request (lognor
 **Monthly GPU-hours: 2,790. Monthly cost: 2,204 EUR.** Structural floor (network + mean
 inference, zero queueing): 297.7 ms -- 2.3 ms of margin under the 300 ms target.
 
-### Scaleway L4-1-24G — fp16 (0.79 EUR/h, assumes the unverified ~2x speedup)
+### Scaleway L4-1-24G — fp16 (0.79 EUR/h, measured speedup curve -- see Section 7)
 
 | Hour | Weekday replicas | Weekday avg/p95 | Weekend replicas | Weekend avg/p95 |
 |---|---|---|---|---|
@@ -200,11 +204,15 @@ than the L40S because this simulation scores GPUs on non-tensor FP32 throughput.
 
 ### AWS eu-west-3 g4dn.xlarge (T4) — fp32 / fp16 (0.615 USD/h, + EKS 0.10 USD/h)
 
-**Structurally infeasible at any replica count, both precisions.** Network + mean inference time
-alone: fp32 = 1,100 ms, fp16 = 552 ms -- both already above the 300 ms average target before any
-queueing. More replicas only reduce queueing wait; they cannot shrink a single request's
-inference time. The T4 is simply too slow under this model's speed proxy to meet the target at
-any capacity or cost.
+**Infeasible at any replica count, both precisions -- for two different reasons.** fp32: network +
+mean inference time alone = 1,100 ms, already above the 300 ms average target before any queueing;
+more replicas only reduce queueing wait, not inference time. fp16: with the old flat-2x assumption
+the mean floor was 552 ms, also above target for the same reason. **With the measured curve
+(Section 7) the mean floor drops to 274 ms**, which is *under* the 300 ms target -- but the p95
+tail is not: large requests only get ~1.1x from fp16, and no replica count (up to the search cap)
+brings the p95 under 1 s. Same verdict, corrected reason: T4 fp16 fails on the tail, not the
+average. The T4 is simply too slow under this model's speed proxy to meet the target at any
+capacity or cost.
 
 ### AWS eu-west-3 g6.xlarge (L4) — fp32 / fp16 (1.0216 USD/h, + EKS 0.10 USD/h)
 
@@ -220,8 +228,9 @@ precision once the EKS control-plane charge and FX conversion are included.
 
 - fp32: 2-6 replicas, avg 287-299 ms, p95 842-909 ms. Monthly GPU-hours: 2,319. Monthly cost:
   3,033 USD (~2,808 EUR).
-- fp16: 1-3 replicas, avg 148-275 ms, p95 462-893 ms. Monthly GPU-hours: 1,084. Monthly cost:
-  1,457 USD (~1,349 EUR).
+- fp16: 1-3 replicas, avg 148-275 ms, p95 462-893 ms. Monthly GPU-hours: 999 (was 1,084 under the
+  old flat-2x assumption -- the only Scaleway/AWS row the real curve actually moved). Monthly
+  cost: 1,347 USD (~1,247 EUR), down from 1,457 USD (~1,349 EUR).
 
 `g6e`, `p4`, and `p5` instance families are not offered in eu-west-3 (decided input), so this is
 the fastest AWS GPU available in-region.
@@ -252,13 +261,66 @@ full size distribution — an approximation): **~4,577 EUR/month**. This is a co
 Bedrock's own latency isn't modeled, and the maintainer's own experience is that it detects
 French PII poorly in large CSV tool results, which is why it isn't a deployment candidate here.
 
-## 7. Real-hardware validation plan (NOT to be run without maintainer approval)
+## 7. Real-hardware validation (done 2026-09-28)
 
-The headline number above depends on two things nothing here has measured: the linear FP32-TFLOPS
-scaling assumption, and the ~2x 16-bit speedup. Before any capacity decision is made from this
-report, both should be checked on real hardware — cheaply, and only once approved.
+**Result: the fp16 speedup is real, but not flat, and it doesn't move the recommended option's
+cost.** Approved and run at the lowest available cost; here is what was measured and how it
+differs from the plan originally proposed.
 
-**Proposed plan:**
+**What was run, and how it deviated from the plan below.** Scaleway had no `L4-1-24G` on offer as
+a short-term rentable instance at the time (Scaleway GPU Instances are monthly, not hourly-billed
+pods), and RunPod -- the provider already used for the production analyzer -- had no L4 or A4500
+in stock in EU-RO-1/EU-CZ-1 at the time either. Rented instead: one RunPod pod, **NVIDIA GeForce
+RTX 4090** (secure cloud, $0.74/h), the closest available proxy: RTX 4090 and L4 are the same Ada
+Lovelace tensor-core generation, unlike the AMPERE-class A4500 the 32-bit baseline was measured on.
+The pod ran the exact private analyzer image already used in production, overriding its entrypoint
+to call `AutoExtractor.from_pretrained(..., quantize=True/False)` directly (`quantize=True` is
+`gliner2`'s built-in fp16 path -- confirmed already present in our pinned `gliner2==2.0.0`, no
+image rebuild needed) on the same 2/10/40 KB synthetic snippet as the original benchmark
+(`docs/ner-model-benchmark.md`), run twice for consistency instead of the plan's
+size-distribution-and-Poisson-load test (cheaper, and it directly answers the one open question --
+does fp16 help, and by how much at each size -- without standing up a full serving stack).
+
+| Size | 32-bit | 16-bit | Speedup |
+|---|---|---|---|
+| 2 KB | 0.114-0.116 s | 0.022-0.024 s | ~5.0x |
+| 10 KB | 0.202-0.204 s | 0.080 s | ~2.5x |
+| 40 KB | 0.557-0.565 s | 0.495-0.516 s | ~1.1x |
+
+Two full runs (RunPod restarted the container after the script's first exit), numbers consistent
+between them. The speedup **shrinks as the request grows**: fp16 mainly cuts small-batch fixed
+overhead, a shrinking share of the total time as the request (and its internal chunk count via
+`extract_entities_long`) grows -- the opposite of the flat multiplier this report assumed before.
+`scripts/capacity/simulate.py` now uses this exact curve (`FP16_SPEEDUP_MEASURED_KB`), interpolated
+between the three points and clamped flat outside [2, 40] KB (no data beyond that range).
+
+**Effect on the report: none, for the option that matters.** Re-running the full simulation with
+the real curve reproduced every Scaleway row byte-for-byte, including the winning Scaleway L4
+16-bit answer (857 EUR/month, 1,084 GPU-hours). The reason: at this GPU's speed and the decided
+load, capacity was never the binding constraint for Scaleway options -- the ">= 2 replicas in
+different zones during working hours" availability floor was, both under the old assumption and
+the real one. Two rows did change: AWS A10G fp16 (999 GPU-hours, $1,347/month, down from 1,084
+hours / $1,457 -- see Section 4), and AWS T4 fp16's infeasibility reason (mean now passes at 274 ms,
+but the p95 tail -- which gets far less benefit from fp16 -- still doesn't; same verdict, corrected
+diagnosis).
+
+**A related bug this run surfaced and fixed**, unrelated to the fp16 curve itself: before this
+measurement, an option that failed the p95 target at every single hour (as T4 fp16 now does) was
+reported as "0 GPU-hours, cost = EKS-only" instead of infeasible -- a silent reporting gap (`build_report`
+only checked the mean-based structural floor up front, not full per-hour infeasibility). It never
+surfaced before because the old flat-2x assumption always made T4 fp16 fail the cheaper mean-only
+check first. Fixed in the same commit as the curve: an option where no hour can be provisioned at
+all is now reported as infeasible with a reason, not a cost.
+
+**Cost:** the pod ran for about 3.5 minutes end to end (image pull included) at $0.74/h --
+**$0.043**, terminated immediately after the second run's output was captured.
+
+**Still unmeasured**, and out of scope for this check: the FP32-TFLOPS cross-GPU scaling
+(Section 3) that projects the RTX A4500 baseline onto Scaleway/AWS GPU types. This run validates
+the *fp16-vs-fp32 ratio on one Ada-class GPU*, not the *absolute A4500-to-L4 speed* the whole report
+scales from -- that would need an actual L4 rental, which wasn't available at the time.
+
+**Original plan (for reference; largely superseded by the above):**
 1. Rent one Scaleway `L4-1-24G` on-demand instance (the cheapest, and the winning option) for a
    short window.
 2. Deploy the existing GLiNER2 worker image, run both the 32-bit and 16-bit model variants
@@ -275,13 +337,8 @@ report, both should be checked on real hardware — cheaply, and only once appro
    support or the console whether "PAR-2 only" really means single-AZ; if so, either would need a
    second zone's worth of capacity from a different GPU type to satisfy the availability floor.
 
-**Cost estimate:** at most 2 hours of `L4-1-24G` (EUR 0.79/h) for the primary check, plus up to 1
-hour each of `L40S-1-48G` (EUR 1.47/h) and `H100-1-80G` (EUR 2.87/h) if needed. **Total: EUR
-1.58-5.92**, i.e. a few euros. No production traffic, no cloud resources beyond the rented
-instance(s), nothing left running afterward.
-
-This plan is not executed by this issue. It is scoped and cost-estimated for the maintainer to
-approve before any instance is rented or benchmark run, per pii-guardian-rjb's constraints.
+If an exact-GPU (L4) or full-load-profile validation is still wanted, steps 3 and 5 above remain
+open and are not superseded by what was run.
 
 ## 8. Reproducing this report
 
@@ -289,10 +346,12 @@ approve before any instance is rented or benchmark run, per pii-guardian-rjb's c
 python3 scripts/capacity/simulate.py --selfcheck              # self-check only
 python3 scripts/capacity/simulate.py                           # full report (defaults reproduce this doc)
 python3 scripts/capacity/simulate.py --gpu scaleway-l4 --rate 10 --precision fp16   # one ad-hoc scenario
-python3 scripts/capacity/simulate.py --fp16-speedup 1.6         # sensitivity: override the unmeasured 16-bit multiplier
+python3 scripts/capacity/simulate.py --fp16-speedup 1.6         # override: flat multiplier instead of the measured curve
 ```
 
 Standard library only. Command-line parameters cover load (`--rate`), GPU type (`--gpu`),
 replicas (`--replicas`, forces a count instead of searching for the minimum), and precision
-(`--precision fp32|fp16`), plus `--fp16-speedup`, `--mean-kb`, `--sigma`, `--seed`, and
-`--min-samples` for revisiting any of the estimated assumptions above.
+(`--precision fp32|fp16`), plus `--mean-kb`, `--sigma`, `--seed`, and `--min-samples` for
+revisiting any of the estimated assumptions above. `--fp16-speedup` now overrides the default
+measured, size-dependent curve (`FP16_SPEEDUP_MEASURED_KB`, Section 7) with a flat value, kept for
+sensitivity checks like the historical table in the executive summary.
