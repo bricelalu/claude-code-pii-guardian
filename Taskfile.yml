@@ -201,8 +201,12 @@ tasks:
         kubectl rollout status deployment/traefik -n kube-system --timeout=90s 2>/dev/null || true
 
         kubectl apply -f manifests/21-litellm-config.yaml
-        kubectl create configmap litellm-guardrail -n "{{.NAMESPACE}}" --from-file=guardrail/code_guard.py \
-          --dry-run=client -o yaml | kubectl apply -f -
+        # The guardrail code the proxy runs, as a manifest rather than an imperative
+        # `kubectl create configmap --from-file`. That form has no manifest, so neither
+        # `kubectl diff` nor git can see it, and a stale copy ships silently.
+        # Both files render into the same ConfigMap, so code_guard.py and the
+        # leak_guard_hook.py that imports from it can never go out of step.
+        python3 scripts/render_placeholders.py manifests/23-litellm-guardrails.yaml | kubectl apply -f -
         kubectl apply -f manifests/10-presidio-analyzer.yaml
         kubectl apply -f manifests/11-presidio-anonymizer.yaml
         kubectl apply -f manifests/22-litellm.yaml
@@ -263,17 +267,232 @@ tasks:
     cmds:
       - kubectl logs -n "{{.NAMESPACE}}" -l app=litellm -f
 
+  verify:
+    desc: Every check that the running cluster matches the repo (needs a live cluster)
+    cmds:
+      - |
+        set -uo pipefail
+        # Three hops, three checks, and the pair that were skipped are the ones that hid a
+        # real defect — a ConfigMap apply leaves the running pod on the old bytes, and
+        # nothing anywhere says so:
+        #   config-drift          manifest   -> ConfigMap
+        #   verify-mounted-bytes  ConfigMap  -> the file the container is executing
+        #   check-guardrails      the file imports, and is a CustomGuardrail so its hooks fire
+        # Run separately, none of them tells you it was skipped, and a check nobody runs is
+        # indistinguishable from a check that passes.
+        #
+        # verify-netpol is deliberately NOT here. It is a behavioural test of the network
+        # policy rather than a repo-vs-cluster comparison, and it is currently red for the
+        # intended state: it expects LiteLLM to reach presidio-analyzer, which is scaled
+        # to 0 on purpose. Folding a permanently-failing check in here would mean `verify`
+        # is always red, and an always-red signal is not read.
+        FAIL=0
+        for target in config-drift verify-mounted-bytes check-guardrails; do
+          echo "=== $target ==="
+          # -s so the sub-task's command is not echoed above its own output. Each target
+          # already reports its own verdict, so only the failure line is added here.
+          if ! task -s "$target"; then
+            echo "✗ $target"
+            FAIL=1
+          fi
+          echo ""
+        done
+        if [ "$FAIL" -ne 0 ]; then
+          echo "✗ cluster does not match the repo — see the failures above"
+          exit 1
+        fi
+        echo "✓ cluster matches the repo on all three hops"
+
+  test:
+    desc: Run the offline test suite (no cluster, no GPU)
+    cmds:
+      - |
+        set -uo pipefail
+        # go-task puts a CLI variable in the template scope but NOT in the command's
+        # environment, so `task test PYTHON=/x` silently fell back to python3 — and
+        # python3 on a PEP-668 system has no pyyaml, so the suite failed on a missing
+        # dependency instead of running. The template reads the CLI form, the shell
+        # fallback reads the environment form, and both spellings now work.
+        PY="{{if .PYTHON}}{{.PYTHON}}{{end}}"
+        PY="${PY:-python3}"
+        FAIL=0
+        # Manifest wiring is checked here, not only in the cluster: a subPath with no
+        # ConfigMap key, or a pasted-in copy of a guardrail file, is a silent failure
+        # that would otherwise surface as a pod stuck in ContainerCreating.
+        for t in scripts/test_manifest_consistency.py \
+                 scripts/test_render_placeholders.py \
+                 scripts/test_fake_mcp_server.py \
+                 scripts/test_e2e_export_mcp.py \
+                 guardrail/test_code_guard.py \
+                 guardrail/test_leak_guard.py \
+                 guardrail/test_leak_guard_hook.py \
+                 guardrail/test_mock_presidio.py; do
+          if out=$("$PY" "$t" 2>&1); then
+            printf '  ok    %s\n' "$t"
+          else
+            printf '  FAIL  %s\n%s\n' "$t" "$out"
+            FAIL=1
+          fi
+        done
+        # A separate script, and a different pass/fail shape from unittest.
+        if out=$("$PY" guardrail/test_integration.py 2>&1); then
+          printf '  ok    %s\n' "guardrail/test_integration.py"
+        else
+          printf '  FAIL  %s\n%s\n' "guardrail/test_integration.py" "$out"
+          FAIL=1
+        fi
+        if [ "$FAIL" -ne 0 ]; then
+          echo ""
+          echo "✗ offline suite failed"
+          exit 1
+        fi
+        echo "✓ offline suite passed"
+
+  e2e:
+    desc: "E2E: Claude Code exports customers_leaked via sqlite3 (Bash) — needs the cluster"
+    cmds:
+      - |
+        PY="{{if .PYTHON}}{{.PYTHON}}{{end}}"
+        PY="${PY:-python3}"
+        "$PY" scripts/e2e_export.py
+
+  e2e-mcp:
+    desc: >-
+      E2E: an MCP server returns customers_leaked in 3 formats — needs the cluster.
+      SCENARIO=customers-nested serves the rows one level down, which is the fixture for
+      pii-guardian-64g and is expected to FAIL until LeakGuard reads past the top level.
+    cmds:
+      - |
+        PY="{{if .PYTHON}}{{.PYTHON}}{{end}}"
+        PY="${PY:-python3}"
+        if [ -n "{{.SCENARIO}}" ]; then
+          exec "$PY" scripts/e2e_export_mcp.py --scenario "{{.SCENARIO}}"
+        fi
+        exec "$PY" scripts/e2e_export_mcp.py
+
+  config-drift:
+    desc: Report any manifest that differs from what the cluster is actually running
+    cmds:
+      - |
+        set -uo pipefail
+        # `kubectl diff` is a server-side dry-run apply: exit 0 means the live object
+        # already matches the manifest, 1 means it would change something. Reading drift
+        # off this is the point — a ConfigMap edited in the cluster, or an older manifest
+        # left applied, produces no error anywhere else.
+        #
+        # Placeholders are always rendered first, so a guardrail file edited in the repo
+        # shows up here as drift rather than waiting for the next apply to disagree.
+        # No -n here: each object carries its own namespace, and 15-traefik-config.yaml
+        # is deliberately in kube-system. Forcing one namespace makes it a false DRIFT.
+        DRIFT=0
+        for m in manifests/*.yaml; do
+          if out=$(python3 scripts/render_placeholders.py -q "$m" | kubectl diff -f - 2>&1); then
+            printf '  ok    %s\n' "$m"
+          else
+            printf '  DRIFT %s\n%s\n' "$m" "$out"
+            DRIFT=1
+          fi
+        done
+        if [ "$DRIFT" -ne 0 ]; then
+          echo ""
+          echo "✗ cluster does not match manifests/ — run 'task reload-config' (or 'task up')"
+          exit 1
+        fi
+        echo "✓ cluster matches manifests/"
+
   reload-config:
     desc: Re-apply LiteLLM config and rolling-restart the deployment
     cmds:
       - |
         set -euo pipefail
         kubectl apply -f manifests/21-litellm-config.yaml
-        kubectl create configmap litellm-guardrail -n "{{.NAMESPACE}}" --from-file=guardrail/code_guard.py \
-          --dry-run=client -o yaml | kubectl apply -f -
+        # Both guardrail ConfigMaps in one render, always. leak_guard_hook.py imports
+        # data_targets() from code_guard.py, so a half-applied pair leaves the proxy
+        # unable to import LeakGuardHook at all — an import error here takes the whole
+        # gateway down, not just this guardrail.
+        python3 scripts/render_placeholders.py manifests/23-litellm-guardrails.yaml | kubectl apply -f -
+        # The Deployment too, not just the ConfigMaps. Config here is split across both
+        # files — the guardrails' mounts in 22, the config.yaml in 21 — so applying only
+        # the ConfigMaps left the pod running a spec the repo no longer described, and
+        # `task config-drift` was the only thing that noticed. This is what makes that
+        # target's "run task reload-config" advice true for every file it checks.
+        kubectl apply -f manifests/22-litellm.yaml
+        # Then restart unconditionally, because apply alone is not enough.
+        #
+        # The guardrail files are mounted with subPath, and a subPath mount is written
+        # once when the container starts and never refreshed: Kubernetes does not update
+        # it when the ConfigMap changes. So a ConfigMap apply leaves the running pod
+        # executing the old bytes, with no error and no event to explain it. Observed
+        # directly — repo and ConfigMap both at sha 1a97cf45 with the fix, the pod still
+        # at bd4d0556 without it, so the fix looked applied and did nothing.
+        #
+        # A rollout restart is therefore the only thing that delivers a ConfigMap change,
+        # and it has to be unconditional: an unchanged Deployment spec makes `apply` a
+        # no-op that creates no new pod, so relying on the apply to restart is how the
+        # stale-file case gets in.
         kubectl rollout restart deployment/litellm -n "{{.NAMESPACE}}"
-        kubectl rollout status deployment/litellm -n "{{.NAMESPACE}}" --timeout=120s
+        kubectl rollout status deployment/litellm -n "{{.NAMESPACE}}" --timeout=180s
         echo "✓ Config reloaded — gateway still reachable at {{.LITELLM_HTTP_URL}}"
+
+  verify-mounted-bytes:
+    desc: Assert the running pod's guardrail files match the ConfigMaps, byte for byte
+    cmds:
+      - python3 scripts/verify_mounted_bytes.py -n "{{.NAMESPACE}}"
+
+  check-guardrails:
+    desc: Import every guardrail the config names, without restarting the proxy
+    cmds:
+      - |
+        set -euo pipefail
+        # A guardrail that fails to import does not degrade — LiteLLM raises during startup
+        # and the whole gateway CrashLoopBackOffs, taking healthy guardrails down with it.
+        # This makes the failure a one-line report instead of an outage.
+        # NOTE: a guardrail that imports but is not a CustomGuardrail subclass is NOT caught
+        # here; LiteLLM loads it happily and its hooks simply never fire. The assertion below
+        # covers that case too.
+        kubectl exec -i -n "{{.NAMESPACE}}" deploy/litellm -- python3 - <<'PY'
+        import hashlib, importlib, sys, yaml
+        from litellm.integrations.custom_guardrail import CustomGuardrail
+
+        # The bytes the pod is actually executing, versus the bytes the ConfigMap holds.
+        # A subPath mount is written once at container start and never refreshed, so a
+        # ConfigMap apply does not reach the running pod. That gap is invisible from
+        # outside — imports still succeed, the guardrail is still registered, and the
+        # old code just quietly keeps running.
+        #
+        # The pod has no kubectl and the repo is not mounted, so the comparison needs the
+        # ConfigMap contents from outside. `task verify-mounted-bytes` does that and is
+        # the check that matters; here we only assert the mount is readable, which is
+        # cheap and still catches a mount that resolved to nothing.
+        bad = 0
+        import glob
+        for mount in sorted(glob.glob("/app/*.py")):
+            name = mount.rsplit("/", 1)[-1]
+            try:
+                if not open(mount).read().strip():
+                    print(f"FAIL empty     {name}: mounted but zero bytes")
+                    bad += 1
+            except Exception as e:
+                print(f"FAIL unmounted {name}: {type(e).__name__}: {e}")
+                bad += 1
+
+        cfg = yaml.safe_load(open("/app/config.yaml"))
+        for g in cfg.get("guardrails", []):
+            path = g.get("litellm_params", {}).get("guardrail", "")
+            if "." not in path:
+                continue  # a built-in, not one of ours
+            mod, _, cls = path.rpartition(".")
+            try:
+                obj = getattr(importlib.import_module(mod), cls)
+            except Exception as e:
+                print(f"FAIL import  {path}: {type(e).__name__}: {e}"); bad += 1; continue
+            if not (isinstance(obj, type) and issubclass(obj, CustomGuardrail)):
+                print(f"FAIL subclass {path}: not a CustomGuardrail — its hooks would never fire")
+                bad += 1; continue
+            print(f"ok   {path}")
+        sys.exit(1 if bad else 0)
+        PY
+        echo "✓ every configured guardrail imports and is a CustomGuardrail"
 
   verify-netpol:
     desc: Verify CiliumNetworkPolicy — allowed traffic passes, blocked traffic is dropped
