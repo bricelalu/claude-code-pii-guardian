@@ -62,7 +62,15 @@ metadata:
   name: presidio-analyzer
   namespace: gateway
 spec:
-  replicas: 1
+  # Scaled to 0 on purpose. The real analyzer is GLiNER2 on a RunPod GPU worker; when
+  # that worker is cold or absent, code_guard's _analyze blocks for its full 120s timeout
+  # and then fails closed, so the whole gateway hangs behind it. Something has to answer
+  # /analyze, and mock-presidio (60-mock-presidio.yaml) is what does here.
+  #
+  # To use the real thing again: set this back to 1, wait for it, and point
+  # PRESIDIO_ANALYZER_API_BASE in 22-litellm.yaml at presidio-analyzer instead of
+  # mock-presidio. The netpol in 40-litellm-netpol.yaml has to allowlist it too.
+  replicas: 0
   selector:
     matchLabels:
       app: presidio-analyzer

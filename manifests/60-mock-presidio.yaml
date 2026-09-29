@@ -1,0 +1,89 @@
+# Mock Presidio analyzer: an offline stand-in for the RunPod-backed presidio-analyzer.
+#
+# Why this exists: the real analyzer is GLiNER2 on a RunPod GPU worker. When that worker
+# is cold, down, or simply unwanted on a laptop, CodeGuard's `_analyze` blocks for its full
+# 120 s timeout and then fails closed — the whole gateway hangs behind it. Scaling the real
+# deployment to 0 alone is not enough; something has to answer /analyze.
+#
+# What it is: a dictionary lookup (guardrail/mock_presidio.py) over the known first/last
+# names and cities of the fixture, returning Presidio-shaped spans. Precision on the
+# fixture is 100% by construction and means nothing. This tests the PIPELINE — CodeGuard's
+# span handling, thresholds, regexes, LeakGuard's column completion — not NER quality.
+#
+# It answers /analyze and /health on :3000, so it is a drop-in for the real service.
+# Point LiteLLM at it with PRESIDIO_ANALYZER_API_BASE (see 22-litellm.yaml).
+#
+# Render and apply (the ConfigMap embeds both files, so they are substituted in first):
+#   python3 -m guardrail.mock_presidio --vocab .pii-score-out/export.csv \
+#       --emit-vocab guardrail/mock_presidio_vocab.json
+#   python3 scripts/render_placeholders.py manifests/60-mock-presidio.yaml | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-presidio
+  namespace: gateway
+data:
+  mock_presidio.py: |
+    __guardrail/mock_presidio.py__
+  mock_presidio_vocab.json: |
+    __guardrail/mock_presidio_vocab.json__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-presidio
+  namespace: gateway
+  labels:
+    app: mock-presidio
+spec:
+  # One replica: the vocabulary is loaded into memory at startup and the state is read-only.
+  # A restart is a cache reset, which is why this is safe to kill at any time.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-presidio
+  template:
+    metadata:
+      labels:
+        app: mock-presidio
+    spec:
+      containers:
+      - name: mock-presidio
+        image: python:3.14-slim
+        command: ["python3", "/app/mock_presidio.py", "--vocab", "/app/mock_presidio_vocab.json", "--port", "3000"]
+        ports:
+        - containerPort: 3000
+        volumeMounts:
+        - name: app
+          mountPath: /app
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: app
+        configMap:
+          name: mock-presidio
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-presidio
+  namespace: gateway
+  labels:
+    app: mock-presidio
+spec:
+  selector:
+    app: mock-presidio
+  ports:
+  - port: 3000
+    targetPort: 3000
