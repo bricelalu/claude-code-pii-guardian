@@ -441,5 +441,11 @@ class VerdictTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print(f"ran {unittest.main(exit=False, verbosity=1).result.testsRun} tests", file=sys.stderr)
-    sys.exit(0)
+    # exit=False because this suite is also run in-process, and that makes the exit status
+    # ours to report. Reporting it as 0 unconditionally — which is what this used to do —
+    # means a failing test reads as a passing one to `task test` and to any CI, and the
+    # only visible sign is a line of stderr nobody is watching. The whole point of running
+    # the file is the status it returns.
+    result = unittest.main(exit=False, verbosity=1).result
+    print(f"ran {result.testsRun} tests", file=sys.stderr)
+    sys.exit(0 if result.wasSuccessful() else 1)

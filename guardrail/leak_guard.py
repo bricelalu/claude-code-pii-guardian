@@ -413,6 +413,31 @@ def _splice(text, span, replacement):
     return text[:span[0]] + replacement + text[span[1]:]
 
 
+def _leaves(node, path="", container=None, key=None):
+    """(path, container, key, value) for every maskable leaf under `node`.
+
+    `path` is the column. `container` and `key` say how to assign one, so
+    `container[key] = token` reaches the value this tuple describes.
+
+    A list index is deliberately not part of `path`. The elements of `tags` are cells of
+    one column, and so are the `sku`s of each object in `items`, so a token in one of
+    them masks the rest. An index in the path would make every element its own column,
+    and nothing would ever be completed.
+
+    Dict keys *are* part of `path`, which is the whole point: `customer.profile.firstname`
+    and a top-level `firstname` are different columns that happen to share a name, and
+    collapsing them on the last segment would mask a column that has no token (64g).
+    """
+    if isinstance(node, dict):
+        for k, value in node.items():
+            yield from _leaves(value, f"{path}.{k}" if path else str(k), node, k)
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            yield from _leaves(value, path, node, i)
+    else:
+        yield path, container, key, node
+
+
 class LeakGuard:
     """Detects and completes partial PII masking in data files.
 
@@ -472,39 +497,36 @@ class LeakGuard:
         if isinstance(data, dict):
             data = [data]
 
-        # Find partially-masked columns
         if not data:
             return text
 
-        # Collect all keys
-        all_keys = set()
-        for row in data:
-            if isinstance(row, dict):
-                all_keys.update(row.keys())
+        # Columns are leaf paths, not top-level keys. A document can put a PII column
+        # anywhere, and reading only the top level made depth binary: a token at
+        # customer.profile.firstname was invisible, so the document was judged unmasked
+        # and every sibling value went to the provider raw (pii-guardian-64g).
+        cells = [cell for row in data if isinstance(row, dict) for cell in _leaves(row)]
+        if not cells:
+            return text
 
         # Find columns with masking tokens
-        partial_cols = {}
-        for key in all_keys:
-            for row in data:
-                if isinstance(row, dict) and key in row:
-                    token = _get_masking_token(row[key])
-                    if token:
-                        partial_cols[key] = token
-                        break
+        partial_paths = {}
+        for path, _container, _key, value in cells:
+            token = _get_masking_token(value)
+            if token and path not in partial_paths:
+                partial_paths[path] = token
 
-        if not partial_cols:
+        if not partial_paths:
             return text
 
         # Complete the masking
         changed = False
-        for row in data:
-            if not isinstance(row, dict):
+        for path, container, key, value in cells:
+            token = partial_paths.get(path)
+            if token is None or _contains_masking_token(value):
                 continue
-            for key, token in partial_cols.items():
-                if key in row and not _contains_masking_token(row[key]):
-                    if not _is_empty_or_whitespace(row[key]):
-                        row[key] = token
-                        changed = True
+            if not _is_empty_or_whitespace(value):
+                container[key] = token
+                changed = True
 
         # Nothing to complete: hand back the caller's bytes. Re-serializing would reflow the
         # document for no gain, and Claude Code resends every turn, so a guardrail that

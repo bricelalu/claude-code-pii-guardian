@@ -358,7 +358,7 @@ def main():
     print(f"  'raw'      = PII cells the server hands over, no gateway in the path")
     print("  'covered'  = of those, in columns the guardrails detect. Excludes the")
     print(f"              {len(UNCOVERED_COLUMNS)} known-gap columns "
-          f"({', '.join(sorted(UNCOVERED_COLUMNS))}), tracked in pii-guardian-ax0.")
+          f"({', '.join(sorted(UNCOVERED_COLUMNS))}), out of scope per pii-guardian-ax0.")
     if not echoable:
         print(f"  NOTE       {rows_wanted} rows is past the echo limit "
               f"({ECHO_MAX_ROWS}), so the model's own replay is SKIPPED as unreliable.")
@@ -505,9 +505,12 @@ def main():
 
     if known_gap_total:
         print(f"\n  {known_gap_total} cell(s) in {', '.join(sorted(UNCOVERED_COLUMNS))} "
-              f"were not masked. That is a known detection gap (pii-guardian-ax0), not a\n"
-              f"  regression, and it is excluded from the verdict on purpose — so the "
-              f"verdict stays a statement\n  about what the guardrails claim to cover.")
+              f"were not masked. Those columns are out of scope by decision")
+        print("  (pii-guardian-ax0), not a regression, and they are excluded from the "
+              "verdict on purpose —")
+        print("  so the verdict stays a statement about what the guardrails claim to "
+              "cover, not about")
+        print("  whether any PII is left.")
 
     if failures:
         print(f"\n✗ E2E failed: {', '.join(sorted(set(failures)))}")

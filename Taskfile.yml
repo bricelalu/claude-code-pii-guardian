@@ -319,7 +319,8 @@ tasks:
         # Manifest wiring is checked here, not only in the cluster: a subPath with no
         # ConfigMap key, or a pasted-in copy of a guardrail file, is a silent failure
         # that would otherwise surface as a pod stuck in ContainerCreating.
-        for t in scripts/test_manifest_consistency.py \
+        for t in scripts/test_suite_wiring.py \
+                 scripts/test_manifest_consistency.py \
                  scripts/test_render_placeholders.py \
                  scripts/test_fake_mcp_server.py \
                  scripts/test_e2e_export_mcp.py \
@@ -360,7 +361,8 @@ tasks:
     desc: >-
       E2E: an MCP server returns customers_leaked in 3 formats — needs the cluster.
       SCENARIO=customers-nested serves the rows one level down, which is the fixture for
-      pii-guardian-64g and is expected to FAIL until LeakGuard reads past the top level.
+      pii-guardian-64g. It was expected to FAIL while LeakGuard read only the top level of
+      a JSON document; it is a regression guard now.
     cmds:
       - |
         PY="{{if .PYTHON}}{{.PYTHON}}{{end}}"

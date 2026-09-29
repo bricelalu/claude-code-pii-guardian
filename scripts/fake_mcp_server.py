@@ -25,11 +25,12 @@ purpose, rather than the end-to-end quietly reporting green over a fixed bug.
                        if this were already clean the harness would pass with the
                        guardrails doing nothing.
   customers-raw        fully unmasked, joined to the ground truth. Exposes zipcode and
-                       birth_date, the two columns with no detection rule at all
-                       (pii-guardian-ax0) — the only place that gap is visible.
+                       birth_date, the two columns with no detection rule at all and
+                       out of scope by decision (pii-guardian-ax0) — the only place
+                       that is visible.
   customers-nested     the same rows one level down, under customer.profile. LeakGuard
-                       reads only the top level, so a token sitting right there is not
-                       seen (pii-guardian-64g).
+                       completes by leaf path, so a nested token covers its column
+                       (pii-guardian-64g, fixed).
   customers-oversized  far more rows than the fixture holds, for the latency budget and
                        the detection path at scale (pii-guardian-pl2).
   free-text            prose with PII and no table anywhere, so there is no column to
@@ -219,14 +220,15 @@ SCENARIOS = {s.name: s for s in (
     Scenario(
         "customers-raw",
         "Fully unmasked, joined to the ground truth. Exposes zipcode and birth_date, the "
-        "two columns with no detection rule at all (pii-guardian-ax0) — the only place "
-        "that gap is observable from outside.",
+        "two columns with no detection rule at all and out of scope by decision "
+        "(pii-guardian-ax0) — the only place that is observable from outside.",
         _raw),
     Scenario(
         "customers-nested",
-        "The same rows one level down, under customer.profile. LeakGuard reads only the "
-        "top level of a JSON document, so a masking token sitting right there is not seen "
-        "and its sibling values go to the provider raw (pii-guardian-64g).",
+        "The same rows one level down, under customer.profile. A document can put a PII "
+        "column anywhere, so LeakGuard completes by leaf path rather than by top-level key "
+        "— which is what it used to do, sending every sibling of a nested token to the "
+        "provider raw (pii-guardian-64g, fixed).",
         _nested),
     Scenario(
         "customers-oversized",

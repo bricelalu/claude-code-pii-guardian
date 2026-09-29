@@ -373,5 +373,109 @@ class PreambleDetectionTest(unittest.TestCase):
         self.assertNotIn("martin", out)
 
 
+# A PII column is a leaf path, not a top-level key. `_complete_json` read only the top
+# level, so a token at customer.profile.firstname was not seen, the document was judged
+# unmasked, and every sibling value went to the provider raw. Depth was binary: the top
+# level worked, one level down did not, and sharing a key name at the top level did not
+# help, because the check was positional rather than name-based (pii-guardian-64g).
+class NestedJsonTest(unittest.TestCase):
+    def setUp(self):
+        self.guard = LeakGuard()
+
+    def complete(self, rows):
+        return json.loads(self.guard.complete(json.dumps(rows, separators=(",", ":"))))
+
+    def test_token_two_levels_down_completes_its_siblings(self):
+        # Two nested columns, each with a token of its own, so this also shows the token
+        # is read from the column being completed rather than from the first one found.
+        out = self.complete([
+            {"id": "1", "customer": {"profile": {"firstname": "<PERSON>", "city": "Lyon"}}},
+            {"id": "2", "customer": {"profile": {"firstname": "bruno", "city": "<LOCATION>"}}},
+        ])
+        self.assertEqual(out[1]["customer"]["profile"]["firstname"], "<PERSON>")
+        self.assertEqual(out[0]["customer"]["profile"]["city"], "<LOCATION>")
+        self.assertEqual([r["id"] for r in out], ["1", "2"])
+
+    def test_token_deeper_still_completes(self):
+        out = self.complete([
+            {"order": {"lines": {"0": {"sku": "<PERSON>", "qty": 2}}}},
+            {"order": {"lines": {"0": {"sku": "mattin", "qty": 1}}}},
+        ])
+        self.assertEqual(out[1]["order"]["lines"]["0"]["sku"], "<PERSON>")
+
+    def test_columns_at_different_depths_are_kept_apart(self):
+        # Two different columns that happen to share a name. Collapsing them on the last
+        # path segment would mask `customer` because `profile.customer` is masked.
+        out = self.complete([
+            {"customer": "bruno", "p": {"customer": "<PERSON>"}},
+            {"customer": "martin", "p": {"customer": "dupont"}},
+        ])
+        self.assertEqual([r["customer"] for r in out], ["bruno", "martin"])
+        self.assertEqual(out[1]["p"]["customer"], "<PERSON>")
+
+    def test_a_nested_column_with_no_token_is_left_alone(self):
+        # `status` is nested and holds no token, so there is no basis to touch it. Depth
+        # is not consent.
+        out = self.complete([
+            {"p": {"firstname": "<PERSON>", "status": "active"}},
+            {"p": {"firstname": "bruno", "status": "inactive"}},
+        ])
+        self.assertEqual([r["p"]["status"] for r in out], ["active", "inactive"])
+
+    def test_list_elements_are_cells_of_one_column(self):
+        # `tags` holds a token, so "vip" beside it is a partially-masked cell and is
+        # completed like any other. The rule is per column, not per type: a CSV column
+        # with one token in it is completed throughout, and a list is a column. An index
+        # in the path would have made every element its own column and completed nothing.
+        out = self.complete([{"tags": ["<PERSON>", "vip"]},
+                             {"tags": ["bruno", "new"]}])
+        self.assertEqual(out, [{"tags": ["<PERSON>", "<PERSON>"]},
+                               {"tags": ["<PERSON>", "<PERSON>"]}])
+
+    def test_objects_in_a_list_share_one_column(self):
+        out = self.complete([
+            {"items": [{"sku": "<PERSON>"}, {"sku": "durable"}]},
+            {"items": [{"sku": "mattin"}, {"sku": "chaussure"}]},
+        ])
+        self.assertEqual([i["sku"] for i in out[1]["items"]], ["<PERSON>", "<PERSON>"])
+
+    def test_siblings_of_the_masked_path_survive(self):
+        # A key order change would fail the E2E's row-count and structure checks for the
+        # wrong reason, so the untouched part of the document has to come back unchanged.
+        out = self.complete([
+            {"id": "1", "customer": {"firstname": "<PERSON>", "note": "keep me"}},
+            {"id": "2", "customer": {"firstname": "bruno", "note": "keep me too"}},
+        ])
+        self.assertEqual([r["id"] for r in out], ["1", "2"])
+        self.assertEqual([r["customer"]["note"] for r in out], ["keep me", "keep me too"])
+        self.assertEqual(list(out[0]), ["id", "customer"])
+        self.assertEqual(list(out[0]["customer"]), ["firstname", "note"])
+
+    def test_non_string_and_null_leaves_are_left_alone(self):
+        # Replacing a number or a null with a token would corrupt the document's types.
+        out = self.complete([{"n": 1, "maybe": None, "p": {"name": "<PERSON>"}},
+                             {"n": 2, "maybe": None, "p": {"name": "bruno"}}])
+        self.assertEqual([r["n"] for r in out], [1, 2])
+        self.assertEqual([r["maybe"] for r in out], [None, None])
+        self.assertEqual(out[1]["p"]["name"], "<PERSON>")
+
+    def test_untouched_nested_document_is_returned_verbatim(self):
+        # Claude Code resends every turn, so a rewrite of an unchanged block churns the
+        # request and defeats the cache. Byte-identical or not rewritten at all.
+        text = json.dumps([{"p": {"name": "bruno"}}, {"p": {"name": "martin"}}],
+                          separators=(",", ":"))
+        self.assertIs(self.guard.complete(text), text)
+
+    def test_surrounding_text_survives_a_nested_rewrite(self):
+        text = ("Export complete, 2 rows.\n"
+                + json.dumps([{"p": {"name": "<PERSON>"}}, {"p": {"name": "bruno"}}],
+                             separators=(",", ":"))
+                + "\n<system-reminder>MCP instructions.</system-reminder>")
+        out = self.guard.complete(text)
+        self.assertIn("Export complete, 2 rows.", out)
+        self.assertIn("<system-reminder>", out)
+        self.assertNotIn("bruno", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -96,19 +96,30 @@ class ScenarioTest(unittest.TestCase):
             self.assertIn("profile", row["customer"])
             self.assertIn("firstname", row["customer"]["profile"])
 
-    def test_nested_really_is_a_leak_that_leakguard_misses(self):
-        # The point of the scenario. Asserted against the live guardrail, so the fixture
-        # cannot rot into a shape that happens to work: if the fix for pii-guardian-64g
-        # lands, this test fails and the scenario has to be re-pointed deliberately.
+    def test_nested_is_no_longer_a_leak_that_leakguard_misses(self):
+        # Re-pointed deliberately when pii-guardian-64g landed, as the test used to demand.
+        # This scenario was the reproduction: a token at customer.profile.firstname was
+        # invisible to _complete_json, the document was judged unmasked, and every sibling
+        # value went to the provider raw. LeakGuard now reads leaf paths, so the nested
+        # shape is a regression guard instead — it must come back masked.
+        #
+        # Judged with the E2E's own unmasked_cells rather than by looking for one name, so
+        # this is the verdict the end-to-end would reach and not a proxy for it. The
+        # capability the scenario used to provide — that the harness can *detect* a leak at
+        # a nested path — is now pinned by NestedLeakCheckTest in test_e2e_export_mcp.py,
+        # which says so in four cases and costs nothing to run.
+        from e2e_export import unmasked_cells
         from leak_guard import LeakGuard
         doc = srv.render(srv.rows_for("customers-nested"), "json")
         seeded = json.loads(doc)
         seeded[0]["customer"]["profile"]["firstname"] = "<PERSON>"
         seeded[0]["customer"]["profile"]["city"] = "<LOCATION>"
         out = LeakGuard().complete(json.dumps(seeded, separators=(",", ":")))
-        self.assertIn("martin", out,
-                      "LeakGuard no longer leaks the nested shape — remove or re-point "
-                      "the customers-nested scenario (pii-guardian-64g)")
+        truth = {str(r["id"]): r["customer"]["profile"] for r in seeded}
+        self.assertEqual(
+            unmasked_cells(json.loads(out), truth), [],
+            "a covered column came back raw from a nested document — LeakGuard regressed "
+            "on pii-guardian-64g")
 
     def test_nested_is_partial_so_it_is_leakguard_and_not_codeguard_under_test(self):
         # The fixture is still half-masked, so the nested values that survive are the
@@ -321,5 +332,11 @@ class SerialiserTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print(f"ran {unittest.main(exit=False, verbosity=1).result.testsRun} tests", file=sys.stderr)
-    sys.exit(0)
+    # exit=False because this suite is also run in-process, and that makes the exit status
+    # ours to report. Reporting it as 0 unconditionally — which is what this used to do —
+    # means a failing test reads as a passing one to `task test` and to any CI, and the
+    # only visible sign is a line of stderr nobody is watching. The whole point of running
+    # the file is the status it returns.
+    result = unittest.main(exit=False, verbosity=1).result
+    print(f"ran {result.testsRun} tests", file=sys.stderr)
+    sys.exit(0 if result.wasSuccessful() else 1)

@@ -46,7 +46,8 @@ MODEL = "claude-haiku-4-5-20251001"
 PII_COLUMNS = ["firstname", "lastname", "customer_email", "phone_number", "address",
                "zipcode", "city", "country", "iban", "last_login_ip", "birth_date"]
 
-# Columns the guardrails do not detect yet, tracked in pii-guardian-ax0. Reported apart
+# Columns the guardrails do not detect, out of scope by decision in pii-guardian-ax0.
+# Reported apart
 # from real failures rather than folded into them, for two reasons.
 #
 # One: it keeps the signal honest in both directions. "FAIL" has to mean the guardrails
@@ -111,7 +112,7 @@ def unmasked_cells(rows, truth, skip=frozenset()):
     already had masked — the fixture is half-masked on purpose, so requiring every cell to
     be a token would demand re-masking the database.
 
-    `skip` holds columns to ignore, so the caller can report a known detection gap
+    `skip` holds columns to ignore, so the caller can report an uncovered column
     separately from a regression.
 
     Columns are matched at any depth, by the last segment of the path. The earlier version
@@ -384,7 +385,7 @@ print(json.dumps({"rows": len(rows), "masked": tokens, "leaked": leaked[:20],
     #
     # Keyed by column, not a flat list, so the pod can tell a leak of a covered column
     # from one of a known-gap column. The two have to stay separable all the way to the
-    # verdict: a zipcode reaching the provider is a known gap in pii-guardian-ax0, while
+    # verdict: a zipcode reaching the provider is out of scope per pii-guardian-ax0, while
     # a city reaching the provider is a rule that stopped working, and averaging them
     # into one count hides the second behind the first.
     values = {}
@@ -435,7 +436,7 @@ def main():
     print("  'raw'      = PII cells in the fixture, with no gateway in the path (the control)")
     print("  'covered'  = of those, the ones in columns the guardrails detect. Excludes the")
     print(f"              {len(UNCOVERED_COLUMNS)} known-gap columns ({', '.join(sorted(UNCOVERED_COLUMNS))}),")
-    print("              tracked in pii-guardian-ax0 and reported below.")
+    print("              out of scope by decision (pii-guardian-ax0), reported below.")
     print("-" * 46)
 
     failures = []
@@ -542,9 +543,12 @@ def main():
     print()
     if known_gap_total:
         print(f"  {known_gap_total} cell(s) in {', '.join(sorted(UNCOVERED_COLUMNS))} were not "
-              f"masked. That is a known detection gap (pii-guardian-ax0), not a")
-        print("  regression, and it is excluded from the verdict above on purpose — so the")
-        print("  verdict stays a statement about what the guardrails claim to cover.")
+              f"masked. Those columns are")
+        print("  out of scope by decision (pii-guardian-ax0), not a regression, and they "
+              "are excluded from")
+        print("  the verdict above on purpose — so the verdict stays a statement about "
+              "what the guardrails")
+        print("  claim to cover, not about whether any PII is left.")
     if failures:
         print(f"✗ E2E failed: {', '.join(failures)}")
         return 1
