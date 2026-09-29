@@ -1,0 +1,47 @@
+# The Python the LiteLLM proxy runs, mounted next to config.yaml.
+#
+# These were ConfigMaps built imperatively with
+#   kubectl create configmap litellm-guardrail --from-file=guardrail/code_guard.py
+# which is the reason this project's config could drift out of sync with its source
+# without anything noticing. An imperative create has no manifest, so `kubectl diff`
+# cannot see it, `git` does not track it, and editing guardrail/code_guard.py changes
+# nothing until someone remembers to re-run the create. That is exactly how a stale
+# /app/code_guard.py survived a refactor and left the proxy unable to import
+# leak_guard_hook.data_targets at all.
+#
+# So: the same files, now declarative, embedded through __path__ placeholders so the
+# bytes in the cluster are the bytes in the repo. That is also what lets
+# scripts/test_manifest_consistency.py assert, in CI, that the keys here match the
+# subPaths the Deployment mounts.
+#
+# Render and apply — never `kubectl create configmap`, which would overwrite this:
+#   python3 scripts/render_placeholders.py manifests/23-litellm-guardrails.yaml | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-guardrail
+  namespace: gateway
+data:
+  # SubPath-mounted at /app/code_guard.py by manifests/22-litellm.yaml.
+  code_guard.py: |
+    __guardrail/code_guard.py__
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-leak-guard
+  namespace: gateway
+data:
+  # SubPath-mounted at /app/leak_guard.py. The engine: pure stdlib, no LiteLLM import,
+  # so it stays testable offline.
+  leak_guard.py: |
+    __guardrail/leak_guard.py__
+  # SubPath-mounted at /app/leak_guard_hook.py. The CustomGuardrail adapter LiteLLM
+  # actually loads — a plain LeakGuard is dropped silently, without a log line.
+  #
+  # This file imports data_targets() from code_guard.py, so the two ConfigMaps above
+  # are a matched pair: update one without the other and the proxy fails to import
+  # LeakGuardHook and CrashLoopBackOffs, taking the working code-guard down as well.
+  # `task check-guardrails` catches that before a restart.
+  leak_guard_hook.py: |
+    __guardrail/leak_guard_hook.py__

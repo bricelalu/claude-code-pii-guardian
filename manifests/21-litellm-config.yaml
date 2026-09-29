@@ -33,9 +33,6 @@ data:
         "haiku": "claude-haiku-4-5-20251001"
         "fable": "claude-fable-5-1"
 
-    general_settings:
-      master_key: "os.environ/LITELLM_MASTER_KEY"
-
     guardrails:
       # One guardrail for Claude Code traffic: guardrail/code_guard.py (mounted next to this file).
       # Masks user text and tool results only; never the system prompt, assistant text,
@@ -66,6 +63,24 @@ data:
           # Deterministic PII (email, IPv4/6, phones, IBAN): REGEXES in guardrail/code_guard.py,
           # where they are unit-tested against real code false positives.
 
+      # Second pass over the same blocks code-guard masks, finishing what it left partial.
+      # guardrail/leak_guard_hook.py (mounted next to this file) is a thin LiteLLM adapter;
+      # guardrail/leak_guard.py holds the engine and stays free of any LiteLLM import.
+      #
+      # ORDER IS LOAD-BEARING: leak-guard must stay listed after code-guard. LeakGuard
+      # completes a column only from a masking token that is already in it, so running
+      # first it has nothing to key on and silently completes nothing.
+      #
+      # It only acts on a document that already carries tokens, so it is a no-op on a
+      # request code-guard fully handled. It shares code_guard's target walk (data_targets)
+      # rather than defining its own idea of a data file — two definitions is how a second
+      # layer ends up rewriting a .py file Claude is editing.
+      - guardrail_name: "leak-guard"
+        litellm_params:
+          guardrail: leak_guard_hook.LeakGuardHook
+          mode: "pre_call"
+          default_on: true
+
       # Disabled for now: logging_only Presidio pass (DATE_TIME and low-score detections).
       # - guardrail_name: "presidio-audit"
       #   litellm_params:
@@ -88,3 +103,24 @@ data:
       json_logs: true
       drop_params: true
       disable_extended_context_check: true  # Add this
+
+    general_settings:
+      master_key: "os.environ/LITELLM_MASTER_KEY"
+      # Claude Code on a Max plan authenticates with an OAuth bearer, not an API key, and
+      # expects the proxy to pass that Authorization header straight through to Anthropic.
+      # Harmless with a real key, required for the OAuth path.
+      # https://docs.litellm.ai/docs/tutorials/claude_code_max_subscription
+      forward_client_headers_to_llm_api: true
+      # Persist the request body in LiteLLM_SpendLogs. Off by default, and with it off the
+      # `messages` and `proxy_server_request` columns are NULL — so there is no record of
+      # what the guardrails actually sent upstream, and the only way to check that masking
+      # worked is to ask the model, which is exactly what cannot be trusted.
+      #
+      # It must live in general_settings, NOT litellm_settings: only general_settings is
+      # fed to that startup handler (proxy_server.py ~L7088), so the key under
+      # litellm_settings is accepted and then never read.
+      #
+      # This is a POC on a laptop with synthetic fixtures, so storing bodies is a
+      # deliberate trade: it makes the masking auditable. Turn it off anywhere real.
+      # The ground-truth check is scripts/e2e_export.py --check-logs-only.
+      store_prompts_in_spend_logs: true

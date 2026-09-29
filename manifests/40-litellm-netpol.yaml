@@ -43,6 +43,16 @@ spec:
         - ports:
             - port: "3000"
               protocol: TCP
+    # Mock Presidio (offline stand-in for presidio-analyzer, see 60-mock-presidio.yaml).
+    # Present so PRESIDIO_ANALYZER_API_BASE can be repointed at the mock without also
+    # editing this policy — a missing entry here fails closed, not open.
+    - toEndpoints:
+        - matchLabels:
+            app: mock-presidio
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
     # Postgres (LiteLLM spend tracking)
     - toEndpoints:
         - matchLabels:
@@ -50,6 +60,14 @@ spec:
       toPorts:
         - ports:
             - port: "5432"
+              protocol: TCP
+    # Mock Anthropic API (for testing)
+    - toEndpoints:
+        - matchLabels:
+            app: mock-anthropic
+      toPorts:
+        - ports:
+            - port: "8081"
               protocol: TCP
     # Anthropic API — external HTTPS only.
     #

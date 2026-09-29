@@ -41,10 +41,27 @@ spec:
                 secretKeyRef:
                   name: litellm-secrets
                   key: ANTHROPIC_API_KEY
+            # Points at mock-presidio, not presidio-analyzer: the real analyzer is scaled
+            # to 0 (see manifests/60-mock-presidio.yaml). code_guard.py fails closed on a
+            # non-200 from here, so pointing this back at the scaled-down analyzer does not
+            # degrade gracefully — it hangs until the 120s analyzer timeout on every
+            # pre_call and then fails the request.
             - name: PRESIDIO_ANALYZER_API_BASE
-              value: "http://presidio-analyzer.gateway.svc.cluster.local:3000"
+              value: "http://mock-presidio.gateway.svc.cluster.local:3000"
             - name: PRESIDIO_ANONYMIZER_API_BASE
               value: "http://presidio-anonymizer.gateway.svc.cluster.local:3000"
+            # LiteLLM truncates long strings before persisting them, replacing the
+            # middle with "...(litellm_truncated skipped N chars...)" plus an advisory.
+            # The default limit is small enough to hit on any real export, and the result
+            # is not a shorter copy of the body — it is a *corrupt* one, so the stored
+            # JSON no longer parses and the recorded value cannot be compared to anything.
+            #
+            # That matters because this column is the audit trail: scripts/e2e_export.py
+            # reads it to prove what the guardrails sent upstream. Truncated, it would
+            # "pass" by never containing the values being searched for — the worst kind of
+            # green. Raised well above any plausible body so the record stays faithful.
+            - name: MAX_STRING_LENGTH_PROMPT_IN_DB
+              value: "10000000"
             - name: LITELLM_LOG
               value: "DEBUG"
             # LITELLM_RUST routes native Anthropic /v1/messages through the
@@ -72,6 +89,15 @@ spec:
             - name: guardrail
               mountPath: /app/code_guard.py
               subPath: code_guard.py
+            # LeakGuard engine, and the CustomGuardrail adapter LiteLLM actually loads.
+            # leak_guard_hook.py imports data_targets() from code_guard.py, so the two
+            # configmaps below have to stay in step (see Taskfile reload-config).
+            - name: leak-guard
+              mountPath: /app/leak_guard.py
+              subPath: leak_guard.py
+            - name: leak-guard
+              mountPath: /app/leak_guard_hook.py
+              subPath: leak_guard_hook.py
           resources:
             requests:
               cpu: 500m
@@ -101,6 +127,10 @@ spec:
         - name: guardrail
           configMap:
             name: litellm-guardrail
+        # Created from guardrail/leak_guard.py + leak_guard_hook.py by the same targets.
+        - name: leak-guard
+          configMap:
+            name: litellm-leak-guard
 ---
 apiVersion: v1
 kind: Service
